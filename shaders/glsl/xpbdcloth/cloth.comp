@@ -1,0 +1,213 @@
+#version 450
+
+struct Particle {
+	vec4 pos;
+	vec4 vel;
+	vec4 uv;
+	vec4 normal;
+};
+
+
+struct ElementInfo {
+    int elemId;
+    ivec2 pid;
+    float restLength;
+  };
+
+layout(std430, binding = 0) buffer ParticleIn {
+	Particle particleIn[ ];
+};
+
+layout(std430, binding = 1) buffer ParticleOut {
+	Particle particleOut[ ];
+};
+
+layout (binding = 2) uniform UBO 
+{
+        float deltaT;
+        float particleMass;
+        float springStiffness;
+        float damping;
+        float sphereRadius;
+        vec4 spherePos;
+        vec4 gravity;
+        ivec2 particleCount;
+} params;
+
+// ElementInfo and elemParallelSlots are now SSBOs instead of UBO
+// because UBO doesn't support dynamic arrays
+layout(std430, binding = 4) buffer ElementInfoBuffer {
+    ElementInfo elementInfo[];
+};
+
+layout(std430, binding = 5) buffer ElemParallelSlotsBuffer {
+    int elemParallelSlots[];
+};
+
+layout (push_constant) uniform PushConsts {
+	uint computeStage;
+	uint parallelSetStartIndex;
+} pushConsts;
+// Lambda buffer for XPBD constraint solving (one lambda per constraint)
+layout(std430, binding = 3) buffer LambdaBuffer {
+  float _lambda[];
+};
+
+
+
+layout (local_size_x = 10, local_size_y = 10) in;
+
+void main() {
+	uint idx = gl_GlobalInvocationID.x;
+	uint numParticles = params.particleCount.x * params.particleCount.y;
+	
+	// ========== BEGIN SOLVE: Predict positions and reset lambdas ==========
+	if (pushConsts.computeStage == 0) {
+		// Predict positions for free particles
+		// For constrained particles: vel = 0
+		if (idx < numParticles) {
+			// Get current position and velocity (using particleIn as input)
+			vec3 pos = particleIn[idx].pos.xyz;
+			vec3 vel = particleIn[idx].vel.xyz;
+			
+			// Calculate displacement predicted by velocity
+			vec3 dx = vel * params.deltaT;
+			
+			// Add gravity effect (only y component)
+			dx.y += params.gravity.y * params.deltaT * params.deltaT;
+			
+			// Save old position to velocities (temporary storage for endSolve)
+			// This allows us to compute v = (x_new - x_old) / dt in endSolve
+			particleOut[idx].vel = vec4(pos, 0.0);
+			
+			// Update predicted position (all particles are free for now)
+			particleOut[idx].pos = vec4(pos + dx, 1.0);
+			
+			// Copy other fields
+			particleOut[idx].uv = particleIn[idx].uv;
+			particleOut[idx].normal = particleIn[idx].normal;
+		}
+		
+		// Reset lambda values for all constraints
+		if (idx < _lambda.length()) {
+			_lambda[idx] = 0.0;
+		}
+	}
+	// ========== CONSTRAINT SOLVE: XPBD iterations ==========
+	if (pushConsts.computeStage == 1) {
+		// Process constraints in parallel sets
+		// Use parallelSetStartIndex from push constant to get current set range
+		uint setStart = pushConsts.parallelSetStartIndex;
+		
+		// Find the end of current parallel set by searching elemParallelSlots
+		uint setEnd = elemParallelSlots.length();
+		uint numSlots = elemParallelSlots.length();
+		
+		// Find which slot index contains setStart
+		for (uint i = 0; i < numSlots - 1; i++) {
+			if (uint(elemParallelSlots[i]) == setStart) {
+				setEnd = uint(elemParallelSlots[i + 1]);
+				break;
+			}
+		}
+		
+		// Calculate element index within current parallel set
+		int elemId = int(setStart) + int(idx);
+		
+		// Check bounds
+		if (elemId >= int(setEnd) || elemId < 0) {
+			return;
+		}
+		
+		if (uint(elemId) >= elementInfo.length()) {
+			return;
+		}
+		
+		// Get element info
+		const ElementInfo elemInfo = elementInfo[elemId];
+		
+		// Calculate inverse mass
+		const float invDt = 1.0 / params.deltaT;
+		const float invDt2 = invDt * invDt;
+		const float massInv = 1.0 / params.particleMass;
+		
+		// Fetch particle positions (3D vectors)
+		vec3 pos0 = particleIn[elemInfo.pid[0]].pos.xyz;
+		vec3 pos1 = particleIn[elemInfo.pid[1]].pos.xyz;
+		
+		// Calculate constraint value (distance constraint)
+		vec3 dir = pos1 - pos0;
+		float currentLength = length(dir);
+		float constraint = currentLength - elemInfo.restLength;
+		
+		// Calculate compliance (alpha) from stiffness
+		// alpha = 1 / (stiffness * invDt2)
+		float alpha = 1.0 / (params.springStiffness * invDt2);
+		
+		// Calculate delta lambda using XPBD formula
+		// DLambda = -C / (w0 + w1 + alpha)
+		// where C is constraint value, w0 and w1 are inverse masses
+		float denominator = massInv + massInv + alpha;
+		float DLambda = -constraint / denominator;
+		
+		// Update lambda (accumulate)
+		_lambda[elemId] += DLambda;
+		
+		// Calculate correction vector (normalized direction)
+		vec3 dirNormalized = (currentLength > 0.001) ? normalize(dir) : vec3(1.0, 0.0, 0.0);
+		
+		// Apply position correction to both particles
+		// For free particles, apply full correction; for constrained particles, apply none
+		// Since we don't have isParticleConstrained buffer, assume all particles are free
+		// (or you can add it later if needed)
+		vec3 correction0 = -massInv * DLambda * dirNormalized;
+		vec3 correction1 = massInv * DLambda * dirNormalized;
+		
+		// Write results back
+		// Note: We need to use atomic operations or ensure no data races
+		// Since we're processing parallel sets (no shared particles), we can write safely
+		particleOut[elemInfo.pid[0]].pos.xyz = particleIn[elemInfo.pid[0]].pos.xyz + correction0;
+		particleOut[elemInfo.pid[1]].pos.xyz = particleIn[elemInfo.pid[1]].pos.xyz + correction1;
+		
+		// Preserve other fields
+		particleOut[elemInfo.pid[0]].vel = particleIn[elemInfo.pid[0]].vel;
+		particleOut[elemInfo.pid[0]].uv = particleIn[elemInfo.pid[0]].uv;
+		particleOut[elemInfo.pid[0]].normal = particleIn[elemInfo.pid[0]].normal;
+		
+		particleOut[elemInfo.pid[1]].vel = particleIn[elemInfo.pid[1]].vel;
+		particleOut[elemInfo.pid[1]].uv = particleIn[elemInfo.pid[1]].uv;
+		particleOut[elemInfo.pid[1]].normal = particleIn[elemInfo.pid[1]].normal;
+	}
+	
+	// ========== END SOLVE: Update velocities ==========
+	if (pushConsts.computeStage == 2) {
+		// Update velocities from position changes
+		// v = (x_new - x_old) / dt, where x_old was stored in vel during beginSolve
+		if (idx >= numParticles) {
+			return;
+		}
+		
+		// Get new position (after constraint solving)
+		vec3 newPos = particleOut[idx].pos.xyz;
+		
+		// Get old position (stored in vel during beginSolve)
+		vec3 oldPos = particleOut[idx].vel.xyz;
+		
+		// Calculate velocity: v = (x_new - x_old) / dt
+		vec3 velocity = (newPos - oldPos) / params.deltaT;
+		
+		// Check if particle is constrained
+		// Note: Currently we don't have isParticleConstrained buffer,
+		// so assume all particles are free (isConstrained = 0)
+		// If you add isParticleConstrained buffer later, use:
+		// uint isConstrained = (idx < isParticleConstrained.length()) ? isParticleConstrained[idx] : 0u;
+		uint isConstrained = 0u; // All particles are free for now
+		
+		// Update velocity: constrained particles have zero velocity
+		particleOut[idx].vel = vec4(float(1 - int(isConstrained)) * velocity, 0.0);
+		
+		// Preserve other fields
+		particleOut[idx].uv = particleIn[idx].uv;
+		particleOut[idx].normal = particleIn[idx].normal;
+	}
+}

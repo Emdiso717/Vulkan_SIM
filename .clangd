@@ -1,0 +1,21 @@
+CompileFlags:
+  Add:
+    - -Ibase
+    - -Iexternal
+    - -Iexternal/glm
+    - -Iexternal/gli
+    - -Iexternal/imgui
+    - -Iexternal/tinygltf
+    - -Iexternal/ktx/include
+    - -Iexternal/ktx/other_include
+    - -DVK_USE_PLATFORM_WIN32_KHR
+    - -DNOMINMAX
+    - -D_USE_MATH_DEFINES
+    - -std=c++20
+  Remove:
+    - -W*
+    - -w
+
+Diagnostics:
+  UnusedIncludes: None
+  MissingIncludes: None
