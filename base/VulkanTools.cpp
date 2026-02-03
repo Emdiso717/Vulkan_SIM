@@ -410,7 +410,10 @@ bool fileExists(const std::string &filename) {
   return !f.fail();
 }
 
-template <typename T> inline T alignedSize(T value, T alignment) {
+// template <typename T> inline T alignedSize(T value, T alignment) {
+//   return (value + alignment - 1) & ~(alignment - 1);
+// }
+uint32_t alignedSize(uint32_t value, uint32_t alignment) {
   return (value + alignment - 1) & ~(alignment - 1);
 }
 

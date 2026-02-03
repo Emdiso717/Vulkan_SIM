@@ -370,15 +370,6 @@ public:
   }
 
   void prepareDescriptorPool() {
-    // This is shared between graphics and compute
-    // Compute descriptor sets need:
-    //   - 2 descriptor sets (ping-pong) * maxConcurrentFrames
-    //   - Each set has: 2 STORAGE_BUFFER (input/output) + 1 UNIFORM_BUFFER + 3
-    //   STORAGE_BUFFER (lambda, elementInfo, elemParallelSlots)
-    //   - Total: maxConcurrentFrames * 2 * (2 + 3) = maxConcurrentFrames * 10
-    //   STORAGE_BUFFER
-    //   - Total: maxConcurrentFrames * 2 * 1 = maxConcurrentFrames * 2
-    //   UNIFORM_BUFFER
     std::vector<VkDescriptorPoolSize> poolSizes = {
         vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                               maxConcurrentFrames *
@@ -619,8 +610,6 @@ public:
     }
 
     // Precompute parallel sets before creating buffers
-    std::cout << "Precompute Stage: Precomputing Elements Parallelable Sets..."
-              << std::endl;
     auto &elemInfos = compute.elementInfo;
     auto nElements = [&]() { return elemInfos.size(); };
     auto nParticles = [&]() { return cloth.gridsize.x * cloth.gridsize.y; };
@@ -660,107 +649,6 @@ public:
       }
       elemParaSets.emplace_back(std::move(currentSet));
     }
-    std::cout << "\tElements Parallelable Sets Precomputed." << std::endl;
-    std::cout << "\tTotal " << elemParaSets.size() << " sets for "
-              << nElements() << " elements." << std::endl;
-    // COUT Parallel Sets Verification
-    {
-      // Debug output: Verify correctness of parallel sets
-      std::cout << "\n=== Debug: Parallel Sets Verification ===" << std::endl;
-
-      // 1. Check each set size and show first few sets
-      uint32_t totalElementsInSets = 0;
-      uint32_t maxSetSize = 0;
-      uint32_t minSetSize = UINT32_MAX;
-      for (size_t i = 0; i < elemParaSets.size(); ++i) {
-        uint32_t setSize = static_cast<uint32_t>(elemParaSets[i].size());
-        totalElementsInSets += setSize;
-        if (setSize > maxSetSize)
-          maxSetSize = setSize;
-        if (setSize < minSetSize)
-          minSetSize = setSize;
-
-        // Show first 5 sets and last set for verification
-        if (i < 5 || i == elemParaSets.size() - 1) {
-          std::cout << "\tSet[" << i << "] size: " << setSize;
-          if (setSize <= 10) {
-            std::cout << " [elements: ";
-            for (auto elemId : elemParaSets[i]) {
-              std::cout << elemId << " ";
-            }
-            std::cout << "]";
-          }
-          std::cout << std::endl;
-        }
-      }
-      std::cout << "\tSet size range: " << minSetSize << " - " << maxSetSize
-                << std::endl;
-      std::cout << "\tTotal elements in all sets: " << totalElementsInSets
-                << " (expected: " << nElements() << ")" << std::endl;
-
-      // 2. Verify no particle conflict within each set
-      bool hasConflict = false;
-      for (size_t setIdx = 0; setIdx < elemParaSets.size(); ++setIdx) {
-        std::vector<bool> particleOccupied(nParticles(), false);
-        for (auto elemId : elemParaSets[setIdx]) {
-          const auto &elemInfo = elemInfos[elemId];
-          for (int i = 0; i < 2; ++i) {
-            int pid = elemInfo.pid[i];
-            if (particleOccupied[pid]) {
-              std::cout << "\tERROR: Set[" << setIdx
-                        << "] has conflict! Particle " << pid
-                        << " appears in multiple constraints." << std::endl;
-              hasConflict = true;
-            }
-            particleOccupied[pid] = true;
-          }
-        }
-      }
-      if (!hasConflict) {
-        std::cout << "\t✓ No particle conflicts within sets (correct!)"
-                  << std::endl;
-      }
-
-      // 3. Verify all elements are present (no duplicates, no missing)
-      std::vector<bool> elementUsed(nElements(), false);
-      for (const auto &set : elemParaSets) {
-        for (auto elemId : set) {
-          if (elemId < 0 || elemId >= static_cast<int>(nElements())) {
-            std::cout << "\tERROR: Invalid element ID " << elemId << " in sets!"
-                      << std::endl;
-          } else if (elementUsed[elemId]) {
-            std::cout << "\tERROR: Element " << elemId
-                      << " appears in multiple sets!" << std::endl;
-          } else {
-            elementUsed[elemId] = true;
-          }
-        }
-      }
-      bool allElementsPresent = true;
-      for (size_t i = 0; i < nElements(); ++i) {
-        if (!elementUsed[i]) {
-          std::cout << "\tERROR: Element " << i << " is missing from all sets!"
-                    << std::endl;
-          allElementsPresent = false;
-        }
-      }
-      if (allElementsPresent && totalElementsInSets == nElements()) {
-        std::cout << "\t✓ All elements present exactly once (correct!)"
-                  << std::endl;
-      }
-
-      // 4. Show sample constraints info
-      std::cout << "\n=== Sample Constraints Info ===" << std::endl;
-      for (size_t i = 0; i < std::min(size_t(20), elemInfos.size()); ++i) {
-        std::cout << "\tConstraint[" << i << "]: pid=(" << elemInfos[i].pid[0]
-                  << "," << elemInfos[i].pid[1]
-                  << "), restLength=" << elemInfos[i].restLength << std::endl;
-      }
-
-      std::cout << "=== End Debug Output ===\n" << std::endl;
-      std::cout.flush(); // Force immediate output
-    }
-
     // reorder elemInfos according to parallelable sets
     std::vector<ElementInfo> reorderedElemInfos;
     reorderedElemInfos.reserve(nElements());
@@ -779,68 +667,6 @@ public:
         static_cast<int>(reorderedElemInfos.size()));
     assert(reorderedElemInfos.size() == nElements());
     std::swap(elemInfos, reorderedElemInfos);
-    // COUT Sample Constraints Info
-    {
-      std::cout << "\n=== Sample Constraints Info ===" << std::endl;
-      for (size_t i = 0; i < std::min(size_t(20), compute.elementInfo.size());
-           ++i) {
-        std::cout << "\tConstraint[" << i << "]: pid=("
-                  << compute.elementInfo[i].pid[0] << ","
-                  << compute.elementInfo[i].pid[1]
-                  << "), restLength=" << compute.elementInfo[i].restLength
-                  << std::endl;
-      }
-
-      // Debug output: Verify reordering
-      std::cout << "\n=== Debug: Reordering Verification ===" << std::endl;
-      std::cout << "\telemParallelSlots size: "
-                << compute.elemParallelSlots.size()
-                << " (expected: " << elemParaSets.size() + 1 << ")"
-                << std::endl;
-      std::cout << "\tReordered elementInfo size: " << elemInfos.size()
-                << " (expected: " << nElements() << ")" << std::endl;
-
-      // Show parallel slots (first 10 and last few)
-      std::cout << "\tParallel slots (first 10): ";
-      for (size_t i = 0;
-           i < std::min(size_t(10), compute.elemParallelSlots.size()); ++i) {
-        std::cout << compute.elemParallelSlots[i] << " ";
-      }
-      std::cout << std::endl;
-      if (compute.elemParallelSlots.size() > 10) {
-        std::cout << "\tParallel slots (last 5): ";
-        for (size_t i = compute.elemParallelSlots.size() - 5;
-             i < compute.elemParallelSlots.size(); ++i) {
-          std::cout << compute.elemParallelSlots[i] << " ";
-        }
-        std::cout << std::endl;
-      }
-      // Verify parallel slots are monotonic
-      bool slotsValid = true;
-      for (size_t i = 1; i < compute.elemParallelSlots.size(); ++i) {
-        if (compute.elemParallelSlots[i] < compute.elemParallelSlots[i - 1]) {
-          std::cout << "\tERROR: Parallel slots not monotonic! Slot[" << i - 1
-                    << "]=" << compute.elemParallelSlots[i - 1] << " > Slot["
-                    << i << "]=" << compute.elemParallelSlots[i] << std::endl;
-          slotsValid = false;
-        }
-      }
-      if (slotsValid) {
-        std::cout << "\t✓ Parallel slots are monotonic (correct!)" << std::endl;
-      }
-
-      // Verify last slot equals total elements
-      if (compute.elemParallelSlots.back() == static_cast<int>(nElements())) {
-        std::cout << "\t✓ Last slot = " << compute.elemParallelSlots.back()
-                  << " = total elements (correct!)" << std::endl;
-      } else {
-        std::cout << "\tERROR: Last slot = " << compute.elemParallelSlots.back()
-                  << " != total elements = " << nElements() << std::endl;
-      }
-
-      std::cout << "=== End Reordering Verification ===\n" << std::endl;
-      std::cout.flush();
-    }
 
     // Initialize lambda data with zeros (one float per constraint)
     uint32_t numElements = static_cast<uint32_t>(compute.elementInfo.size());
@@ -848,9 +674,6 @@ public:
 
     // Create all buffers at once (after data preparation is complete)
     // 1. ElementInfo buffer (SSBO)
-    // Debug: Verify struct size matches GLSL std430 layout (should be 20 bytes)
-    std::cout << "ElementInfo struct size: " << sizeof(ElementInfo)
-              << " bytes (expected: 20 for std430 layout)" << std::endl;
     VkDeviceSize elementInfoBufferSize = numElements * sizeof(ElementInfo);
     vks::Buffer stagingElementInfoBuffer;
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -1062,7 +885,7 @@ public:
     if (!paused) {
       // SRS - Clamp frameTimer to max 20ms refresh period (e.g. if blocked on
       // resize), otherwise image breakup can occur
-      compute.uniformData.deltaT = fmin(frameTimer, 0.02f) * 0.25f;
+      compute.uniformData.deltaT = fmin(frameTimer, 0.02);
 
       if (simulateWind) {
         std::default_random_engine rndEngine(
@@ -1091,10 +914,6 @@ public:
   }
 
   void prepare() {
-#if defined(_WIN32)
-    // Setup console to see std::cout output
-    setupConsole("XPBD Cloth Simulation");
-#endif
     VulkanExampleBase::prepare();
     // Check whether the compute queue family is distinct from the graphics
     // queue family
@@ -1205,145 +1024,125 @@ public:
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                       compute.pipeline);
 
-    // ========== readSet 逻辑说明 ==========
-    // descriptorSet[0]: particleIn=input,  particleOut=output
-    // descriptorSet[1]: particleIn=output, particleOut=input  (交换了!)
-    //
-    // 每一帧的执行流程:
-    // 第一帧:
-    //   Stage 0: readSet=0 → 从 input 读取，写入 output
-    //   Stage 1: readSet=1 → 从 output 读取，写入 input  (切换!)
-    //   Stage 2: readSet=1 → 从 output 读取，写入 input
-    //   结束后: persistentReadSet = 0 → 下一帧从 input 读取
-    //
-    // 第二帧:
-    //   Stage 0: readSet=0 → 从 input 读取，写入 output
-    //   Stage 1: readSet=1 → 从 output 读取，写入 input  (切换!)
-    //   Stage 2: readSet=1 → 从 output 读取，写入 input
-    //   结束后: persistentReadSet = 0 → 下一帧从 input 读取
-    //
-    // 关键点:
-    //   - Stage 0 不切换 readSet，保持当前值
-    //   - Stage 1 每次迭代开始时切换 readSet (ping-pong)
-    //   - Stage 2 不切换 readSet，使用 Stage 1 结束后的值
-    //   - 每帧结束后，更新 persistentReadSet 为下一帧准备
-    // ========================================
-    static uint32_t persistentReadSet = 0;
-    readSet = persistentReadSet;
-    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            compute.pipelineLayout, 0, 1,
-                            &compute.descriptorSets[readSet], 0, 0);
-
-    // Stage 0: Begin solve (computeStage = 0)
-    // Initialize predicted positions, save old positions, reset lambda values
-    PushConstants pushConsts;
-    pushConsts.computeStage = 0;
-    pushConsts.parallelSetStartIndex = 1;
-    vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
-                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants),
-                       &pushConsts);
-
-    // Dispatch for all particles
-    // 工作组大小是 local_size_x = 10 (1D)
-    // 总粒子数 = gridsize.x * gridsize.y = 60 * 60 = 3600
-    // 需要的线程数 = 3600
-    // 工作组数量 = (3600 + 9) / 10 = 360
-    uint32_t numParticles = cloth.gridsize.x * cloth.gridsize.y;
-    uint32_t workgroupSizeX = 10; // 匹配 shader 中的 local_size_x
-    uint32_t numWorkgroupsX =
-        (numParticles + workgroupSizeX - 1) / workgroupSizeX;
-    vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
-
-    // Barrier after begin solve
-    addComputeToComputeBarriers(cmdBuffer, readSet);
-
-    // Stage 1: Constraint solving (computeStage = 1)
-    // Iterate over all parallel sets and solve constraints
-    const uint32_t numParallelSets =
-        static_cast<uint32_t>(compute.elemParallelSlots.size()) - 1;
-    const uint32_t constraintIterations = 1;
-
-    for (uint32_t iter = 0; iter < constraintIterations; iter++) {
-      // Ping-pong buffers for each iteration
-      // 每次迭代开始时切换 readSet: 0→1 或 1→0
-      // 这样可以在 input 和 output 之间交替读写，避免数据竞争
+    for (int _i = 0; _i < 1; _i++) {
+      static uint32_t persistentReadSet = 0;
+      readSet = persistentReadSet;
       vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                               compute.pipelineLayout, 0, 1,
                               &compute.descriptorSets[readSet], 0, 0);
 
-      // Iterate over all parallel sets
-      for (uint32_t setIdx = 0; setIdx < numParallelSets; setIdx++) {
-        pushConsts.computeStage = 1;
-        pushConsts.parallelSetStartIndex = setIdx;
-        vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
-                           VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                           sizeof(PushConstants), &pushConsts);
+      // Stage 0: Begin solve (computeStage = 0)
+      // Initialize predicted positions, save old positions, reset lambda values
+      PushConstants pushConsts;
+      pushConsts.computeStage = 0;
+      pushConsts.parallelSetStartIndex = 1;
+      vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
+                         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants),
+                         &pushConsts);
 
-        // Dispatch for this parallel set
-        // Calculate number of elements in this set
-        uint32_t setStart = compute.elemParallelSlots[setIdx];
-        uint32_t setEnd = compute.elemParallelSlots[setIdx + 1];
-        uint32_t setSize = setEnd - setStart;
+      // Dispatch for all particles
+      // 工作组大小是 local_size_x = 10 (1D)
+      // 总粒子数 = gridsize.x * gridsize.y = 60 * 60 = 3600
+      // 需要的线程数 = 3600
+      // 工作组数量 = (3600 + 9) / 10 = 360
+      uint32_t numParticles = cloth.gridsize.x * cloth.gridsize.y;
+      uint32_t workgroupSizeX = 10; // 匹配 shader 中的 local_size_x
+      uint32_t numWorkgroupsX =
+          (numParticles + workgroupSizeX - 1) / workgroupSizeX;
+      vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
 
-        // Dispatch based on element count
-        // 工作组大小是 local_size_x = 10 (1D)
-        // 工作组数量 = (setSize + 9) / 10
-        uint32_t workgroupSizeX = 10; // 匹配 shader 中的 local_size_x
-        uint32_t numWorkgroupsX =
-            (setSize + workgroupSizeX - 1) / workgroupSizeX;
-        vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
+      // Barrier after begin solve
+      addComputeToComputeBarriers(cmdBuffer, readSet);
 
-        // Barrier between parallel sets within same iteration
-        if (setIdx < numParallelSets - 1) {
+      // Stage 1: Constraint solving (computeStage = 1)
+      // Iterate over all parallel sets and solve constraints
+      const uint32_t numParallelSets =
+          static_cast<uint32_t>(compute.elemParallelSlots.size()) - 1;
+      const uint32_t constraintIterations = 1;
+
+      for (uint32_t iter = 0; iter < constraintIterations; iter++) {
+        // Ping-pong buffers for each iteration
+        // 每次迭代开始时切换 readSet: 0→1 或 1→0
+        // 这样可以在 input 和 output 之间交替读写，避免数据竞争
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                compute.pipelineLayout, 0, 1,
+                                &compute.descriptorSets[readSet], 0, 0);
+
+        // Iterate over all parallel sets
+        for (uint32_t setIdx = 0; setIdx < numParallelSets; setIdx++) {
+          pushConsts.computeStage = 1;
+          pushConsts.parallelSetStartIndex = setIdx;
+          vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
+                             VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                             sizeof(PushConstants), &pushConsts);
+
+          // Dispatch for this parallel set
+          // Calculate number of elements in this set
+          uint32_t setStart = compute.elemParallelSlots[setIdx];
+          uint32_t setEnd = compute.elemParallelSlots[setIdx + 1];
+          uint32_t setSize = setEnd - setStart;
+
+          // Dispatch based on element count
+          // 工作组大小是 local_size_x = 10 (1D)
+          // 工作组数量 = (setSize + 9) / 10
+          uint32_t workgroupSizeX = 10; // 匹配 shader 中的 local_size_x
+          uint32_t numWorkgroupsX =
+              (setSize + workgroupSizeX - 1) / workgroupSizeX;
+          vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
+
+          // Barrier between parallel sets within same iteration
+          if (setIdx < numParallelSets - 1) {
+            addComputeToComputeBarriers(cmdBuffer, readSet);
+          }
+        }
+
+        // Barrier between constraint iterations
+        if (iter < constraintIterations - 1) {
           addComputeToComputeBarriers(cmdBuffer, readSet);
         }
       }
 
-      // Barrier between constraint iterations
-      if (iter < constraintIterations - 1) {
-        addComputeToComputeBarriers(cmdBuffer, readSet);
-      }
+      // Stage 2: End solve (computeStage = 2)
+      // Update velocities based on position changes
+      // After Stage 1, readSet points to the buffer containing predicted
+      // positions We need to read from that buffer (particleIn) and write
+      // velocities to the other buffer (particleOut) No need to change readSet
+      // - keep it as is after Stage 1 After 1 iteration of Stage 1, readSet=1:
+      // particleIn=output, particleOut=input
+
+      pushConsts.computeStage = 2;
+      pushConsts.parallelSetStartIndex = 0;
+      // readSet is already correct from Stage 1, don't override it
+      vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                              compute.pipelineLayout, 0, 1,
+                              &compute.descriptorSets[readSet], 0, 0);
+      vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
+                         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants),
+                         &pushConsts);
+
+      // Dispatch for all particles
+      // 工作组大小是 local_size_x = 10 (1D)
+      // 总粒子数 = gridsize.x * gridsize.y = 60 * 60 = 3600
+      // 需要的线程数 = 3600
+      // 工作组数量 = (3600 + 9) / 10 = 360
+      uint32_t numParticlesStage2 = cloth.gridsize.x * cloth.gridsize.y;
+      uint32_t workgroupSizeXStage2 = 10; // 匹配 shader 中的 local_size_x
+      uint32_t numWorkgroupsXStage2 =
+          (numParticlesStage2 + workgroupSizeXStage2 - 1) /
+          workgroupSizeXStage2;
+      vkCmdDispatch(cmdBuffer, numWorkgroupsXStage2, 1, 1);
+
+      // Release the storage buffers back to the graphics queue
+      addComputeToGraphicsBarriers(cmdBuffer, VK_ACCESS_SHADER_WRITE_BIT, 0,
+                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                   VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+
+      // After Stage 2, toggle readSet for next frame's Stage 0 to read from
+      // correct buffer Stage 2 写入到 input (readSet=1: particleOut=input)
+      // 所以下一帧的 Stage 0 应该从 input 读取，即使用 readSet=0
+      // (readSet=0: particleIn=input, particleOut=output)
+      persistentReadSet = 1 - readSet;
     }
-
-    // Stage 2: End solve (computeStage = 2)
-    // Update velocities based on position changes
-    // After Stage 1, readSet points to the buffer containing predicted
-    // positions We need to read from that buffer (particleIn) and write
-    // velocities to the other buffer (particleOut) No need to change readSet -
-    // keep it as is after Stage 1 After 1 iteration of Stage 1, readSet=1:
-    // particleIn=output, particleOut=input
-
-    pushConsts.computeStage = 2;
-    pushConsts.parallelSetStartIndex = 0;
-    // readSet is already correct from Stage 1, don't override it
-    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            compute.pipelineLayout, 0, 1,
-                            &compute.descriptorSets[readSet], 0, 0);
-    vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
-                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants),
-                       &pushConsts);
-
-    // Dispatch for all particles
-    // 工作组大小是 local_size_x = 10 (1D)
-    // 总粒子数 = gridsize.x * gridsize.y = 60 * 60 = 3600
-    // 需要的线程数 = 3600
-    // 工作组数量 = (3600 + 9) / 10 = 360
-    uint32_t numParticlesStage2 = cloth.gridsize.x * cloth.gridsize.y;
-    uint32_t workgroupSizeXStage2 = 10; // 匹配 shader 中的 local_size_x
-    uint32_t numWorkgroupsXStage2 =
-        (numParticlesStage2 + workgroupSizeXStage2 - 1) / workgroupSizeXStage2;
-    vkCmdDispatch(cmdBuffer, numWorkgroupsXStage2, 1, 1);
-
-    // Release the storage buffers back to the graphics queue
-    addComputeToGraphicsBarriers(cmdBuffer, VK_ACCESS_SHADER_WRITE_BIT, 0,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-
-    // After Stage 2, toggle readSet for next frame's Stage 0 to read from
-    // correct buffer Stage 2 写入到 input (readSet=1: particleOut=input)
-    // 所以下一帧的 Stage 0 应该从 input 读取，即使用 readSet=0
-    // (readSet=0: particleIn=input, particleOut=output)
-    persistentReadSet = 1 - readSet;
 
     vkEndCommandBuffer(cmdBuffer);
   }
@@ -1376,100 +1175,6 @@ public:
       submitInfo.pCommandBuffers = &compute.commandBuffers[currentBuffer];
       VK_CHECK_RESULT(vkQueueSubmit(compute.queue, 1, &submitInfo,
                                     compute.fences[currentBuffer]));
-    }
-
-    // Debug: Read particle positions and velocities from GPU
-    {
-      static uint32_t frameCount = 0;
-      static uint32_t lastPrintFrame = 0;
-
-      // Wait for compute to complete
-      VK_CHECK_RESULT(vkWaitForFences(device, 1, &compute.fences[currentBuffer],
-                                      VK_TRUE, UINT64_MAX));
-
-      // Read particle data every 60 frames to avoid too much output
-      if (frameCount - lastPrintFrame >= 60) {
-        lastPrintFrame = frameCount;
-
-        // Determine which buffer contains the final results after Stage 2
-        // After Stage 2, readSet=1, so output buffer contains final positions
-        // But actually, after Stage 2, readSet points to the buffer where
-        // velocities were written Let's read from output buffer (which should
-        // have the final state)
-        VkDeviceSize particleBufferSize =
-            cloth.gridsize.x * cloth.gridsize.y * sizeof(Particle);
-
-        // Create staging buffer to read from GPU
-        vks::Buffer stagingParticleBuffer;
-        vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                                   &stagingParticleBuffer, particleBufferSize);
-
-        // Copy from output buffer (final state) to staging buffer
-        VkCommandBuffer copyCmd = vulkanDevice->createCommandBuffer(
-            VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
-        VkBufferCopy copyRegion = {};
-        copyRegion.size = particleBufferSize;
-        vkCmdCopyBuffer(copyCmd, storageBuffers.output.buffer,
-                        stagingParticleBuffer.buffer, 1, &copyRegion);
-        vulkanDevice->flushCommandBuffer(copyCmd, queue, true);
-
-        // Map and read values
-        VK_CHECK_RESULT(stagingParticleBuffer.map());
-        Particle *particles = (Particle *)stagingParticleBuffer.mapped;
-
-        // Output deltaT and gravity values
-        std::cout << "\n========== Frame " << frameCount
-                  << " ==========" << std::endl;
-        std::cout << "deltaT: " << compute.uniformData.deltaT << std::endl;
-        std::cout << "gravity: (" << compute.uniformData.gravity.x << ", "
-                  << compute.uniformData.gravity.y << ", "
-                  << compute.uniformData.gravity.z << ")" << std::endl;
-
-        // Output positions and velocities for a few key particles
-        uint32_t numParticles = cloth.gridsize.x * cloth.gridsize.y;
-        uint32_t centerIdx =
-            (cloth.gridsize.y / 2) * cloth.gridsize.x + (cloth.gridsize.x / 2);
-        uint32_t cornerIdx = 0;              // First particle (top-left)
-        uint32_t lastIdx = numParticles - 1; // Last particle
-
-        std::cout << "\nParticle " << cornerIdx << " (first):" << std::endl;
-        std::cout << "  pos: (" << particles[cornerIdx].pos.x << ", "
-                  << particles[cornerIdx].pos.y << ", "
-                  << particles[cornerIdx].pos.z << ")" << std::endl;
-        std::cout << "  vel: (" << particles[cornerIdx].vel.x << ", "
-                  << particles[cornerIdx].vel.y << ", "
-                  << particles[cornerIdx].vel.z << ")" << std::endl;
-
-        if (centerIdx < numParticles) {
-          std::cout << "\nParticle " << centerIdx << " (center):" << std::endl;
-          std::cout << "  pos: (" << particles[centerIdx].pos.x << ", "
-                    << particles[centerIdx].pos.y << ", "
-                    << particles[centerIdx].pos.z << ")" << std::endl;
-          std::cout << "  vel: (" << particles[centerIdx].vel.x << ", "
-                    << particles[centerIdx].vel.y << ", "
-                    << particles[centerIdx].vel.z << ")" << std::endl;
-        }
-
-        if (lastIdx < numParticles) {
-          std::cout << "\nParticle " << lastIdx << " (last):" << std::endl;
-          std::cout << "  pos: (" << particles[lastIdx].pos.x << ", "
-                    << particles[lastIdx].pos.y << ", "
-                    << particles[lastIdx].pos.z << ")" << std::endl;
-          std::cout << "  vel: (" << particles[lastIdx].vel.x << ", "
-                    << particles[lastIdx].vel.y << ", "
-                    << particles[lastIdx].vel.z << ")" << std::endl;
-        }
-
-        std::cout << "====================================" << std::endl;
-        std::cout.flush();
-
-        stagingParticleBuffer.unmap();
-        stagingParticleBuffer.destroy();
-      }
-
-      frameCount++;
     }
 
     // Submit graphics commands

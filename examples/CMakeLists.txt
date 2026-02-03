@@ -88,7 +88,6 @@ endfunction(buildExamples)
 
 set(EXAMPLES
 	computecloth
-	xpbdcloth
 	xpbd
 )
 
