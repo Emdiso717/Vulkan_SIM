@@ -7,7 +7,6 @@
 
 class VulkanExample : public VulkanExampleBase {
 public:
-  uint32_t readSet{0};
   uint32_t indexCount{0};
   bool simulateWind{false};
   bool dedicatedComputeQueue{false};
@@ -39,7 +38,6 @@ public:
   } storageBuffers;
 
   struct PushConstants {
-    uint32_t computeStage;
     uint32_t parallelSetStartIndex;
   };
 
@@ -74,7 +72,11 @@ public:
     std::array<VkDescriptorSet, maxConcurrentFrames> descriptorSets{
         VK_NULL_HANDLE};
     VkPipelineLayout pipelineLayout{VK_NULL_HANDLE};
-    VkPipeline pipeline{VK_NULL_HANDLE};
+    struct Pipelines {
+      VkPipeline begin{VK_NULL_HANDLE};
+      VkPipeline solve{VK_NULL_HANDLE};
+      VkPipeline end{VK_NULL_HANDLE};
+    } pipelines;
     struct UniformData {
       float deltaT{0.0f};
       float particleMass{0.1f};
@@ -124,7 +126,9 @@ public:
       vkDestroyPipelineLayout(device, compute.pipelineLayout, nullptr);
       vkDestroyDescriptorSetLayout(device, compute.descriptorSetLayout,
                                    nullptr);
-      vkDestroyPipeline(device, compute.pipeline, nullptr);
+      vkDestroyPipeline(device, compute.pipelines.begin, nullptr);
+      vkDestroyPipeline(device, compute.pipelines.solve, nullptr);
+      vkDestroyPipeline(device, compute.pipelines.end, nullptr);
       for (auto &fence : compute.fences) {
         vkDestroyFence(device, fence, nullptr);
       }
@@ -186,8 +190,7 @@ public:
     }
   }
 
-  void addComputeToComputeBarriers(VkCommandBuffer commandBuffer,
-                                   uint32_t readSet) {
+  void addComputeToComputeBarriers(VkCommandBuffer commandBuffer) {
     VkBufferMemoryBarrier bufferBarrier =
         vks::initializers::bufferMemoryBarrier();
     bufferBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -196,22 +199,11 @@ public:
     bufferBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bufferBarrier.size = VK_WHOLE_SIZE;
     std::vector<VkBufferMemoryBarrier> bufferBarriers;
-    if (readSet == 0) {
-      // SRS - we have written to output.buffer and need a memory barrier before
-      // reading it
-      //	   - don't need a memory barrier for input.buffer, the execution
-      // barrier is enough
-      bufferBarrier.buffer = storageBuffers.output.buffer;
-      bufferBarriers.push_back(bufferBarrier);
-    } else // if (readSet == 1)
-    {
-      // SRS - we have written to input.buffer and need a memory barrier before
-      // reading it
-      //	   - don't need a memory barrier for output.buffer, the
-      // execution barrier is enough
-      bufferBarrier.buffer = storageBuffers.input.buffer;
-      bufferBarriers.push_back(bufferBarrier);
-    }
+    // Conservatively add a memory barrier for both particle buffers
+    bufferBarrier.buffer = storageBuffers.input.buffer;
+    bufferBarriers.push_back(bufferBarrier);
+    bufferBarrier.buffer = storageBuffers.output.buffer;
+    bufferBarriers.push_back(bufferBarrier);
     vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_FLAGS_NONE, 0,
                          nullptr, static_cast<uint32_t>(bufferBarriers.size()),
@@ -729,7 +721,7 @@ public:
         vks::initializers::pipelineLayoutCreateInfo(
             &compute.descriptorSetLayout, 1);
 
-    // Push constants used to pass some parameters
+    // Push constant used for the solve stage (parallel set index)
     VkPushConstantRange pushConstantRange =
         vks::initializers::pushConstantRange(VK_SHADER_STAGE_COMPUTE_BIT,
                                              sizeof(PushConstants), 0);
@@ -742,11 +734,9 @@ public:
         vks::initializers::descriptorSetAllocateInfo(
             descriptorPool, &compute.descriptorSetLayout, 1);
 
-    // Create two descriptor sets with input and output buffers switched
+    // Single descriptor set, fixed binding of input/output buffers
     VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocInfo,
                                              &compute.descriptorSets[0]));
-    VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocInfo,
-                                             &compute.descriptorSets[1]));
 
     std::vector<VkWriteDescriptorSet> computeWriteDescriptorSets = {
         vks::initializers::writeDescriptorSet(
@@ -766,40 +756,36 @@ public:
             &compute.elementInfoBuffer.descriptor),
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5,
-            &compute.elemParallelSlotsBuffer.descriptor),
-
-        vks::initializers::writeDescriptorSet(
-            compute.descriptorSets[1], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 0,
-            &storageBuffers.output.descriptor),
-        vks::initializers::writeDescriptorSet(
-            compute.descriptorSets[1], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-            &storageBuffers.input.descriptor),
-        vks::initializers::writeDescriptorSet(
-            compute.descriptorSets[1], VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2,
-            &compute.uniformBuffer.descriptor),
-        vks::initializers::writeDescriptorSet(
-            compute.descriptorSets[1], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3,
-            &compute.lambdaBuffer.descriptor),
-        vks::initializers::writeDescriptorSet(
-            compute.descriptorSets[1], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4,
-            &compute.elementInfoBuffer.descriptor),
-        vks::initializers::writeDescriptorSet(
-            compute.descriptorSets[1], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5,
             &compute.elemParallelSlotsBuffer.descriptor)};
 
     vkUpdateDescriptorSets(
         device, static_cast<uint32_t>(computeWriteDescriptorSets.size()),
         computeWriteDescriptorSets.data(), 0, NULL);
 
-    // Create pipeline
+    // Create pipelines (begin / solve / end)
     VkComputePipelineCreateInfo computePipelineCreateInfo =
         vks::initializers::computePipelineCreateInfo(compute.pipelineLayout, 0);
+
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "xpbdcloth/cloth.comp.spv",
+        loadShader(getShadersPath() + "xpbdcloth/cloth_begin.comp.spv",
+                   VK_SHADER_STAGE_COMPUTE_BIT);
+    VK_CHECK_RESULT(vkCreateComputePipelines(
+        device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
+        &compute.pipelines.begin));
+
+    computePipelineCreateInfo.stage =
+        loadShader(getShadersPath() + "xpbdcloth/cloth_solve.comp.spv",
+                   VK_SHADER_STAGE_COMPUTE_BIT);
+    VK_CHECK_RESULT(vkCreateComputePipelines(
+        device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
+        &compute.pipelines.solve));
+
+    computePipelineCreateInfo.stage =
+        loadShader(getShadersPath() + "xpbdcloth/cloth_end.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1,
                                              &computePipelineCreateInfo,
-                                             nullptr, &compute.pipeline));
+                                             nullptr, &compute.pipelines.end));
 
     // Separate command pool as queue family for compute may be different than
     // graphics
@@ -845,11 +831,16 @@ public:
 
   void updateComputeUBO() {
     if (!paused) {
-      // SRS - Clamp frameTimer to max 20ms refresh period (e.g. if blocked on
-      // resize), otherwise image breakup can occur
-      //   compute.uniformData.deltaT = fmin(frameTimer, 0.02f) * 0.0025f;
-      compute.uniformData.deltaT = fmin(frameTimer, 0.02);
-
+// SRS - Clamp frameTimer to max 20ms refresh period (e.g. if blocked on
+// resize), otherwise image breakup can occur
+#if defined(__ANDROID__)
+      // Android can have very long frame times when the app is paused in the
+      // background, so we clamp to 1 second to avoid extremely large deltaT
+      // values that can cause instability in the simulation
+      compute.uniformData.deltaT = 0.005f;
+#else
+      compute.uniformData.deltaT = fmin(frameTimer, 0.02) * 0.8;
+#endif
       if (simulateWind) {
         std::default_random_engine rndEngine(
             benchmark.active ? 0 : (unsigned)time(nullptr));
@@ -978,128 +969,81 @@ public:
                                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
+    // Single descriptor set, fixed binding of input/output buffers
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            compute.pipelineLayout, 0, 1,
+                            &compute.descriptorSets[0], 0, 0);
+
+    // Stage 0: Begin solve
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                      compute.pipeline);
+                      compute.pipelines.begin);
 
-    for (int _i = 0; _i < 1; _i++) {
-      static uint32_t persistentReadSet = 0;
-      readSet = persistentReadSet;
-      vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                              compute.pipelineLayout, 0, 1,
-                              &compute.descriptorSets[readSet], 0, 0);
+    // Dispatch for all particles
+    uint32_t numParticles = cloth.gridsize.x * cloth.gridsize.y;
+    uint32_t workgroupSizeX = 10;
+    uint32_t numWorkgroupsX =
+        (numParticles + workgroupSizeX - 1) / workgroupSizeX;
+    vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
 
-      // Stage 0: Begin solve (computeStage = 0)
-      // Initialize predicted positions, save old positions, reset lambda values
-      PushConstants pushConsts;
-      pushConsts.computeStage = 0;
-      pushConsts.parallelSetStartIndex = 1;
-      vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
-                         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants),
-                         &pushConsts);
+    // Barrier after begin solve
+    addComputeToComputeBarriers(cmdBuffer);
 
-      // Dispatch for all particles
-      // 工作组大小是 local_size_x = 10 (1D)
-      // 总粒子数 = gridsize.x * gridsize.y = 60 * 60 = 3600
-      // 需要的线程数 = 3600
-      // 工作组数量 = (3600 + 9) / 10 = 360
-      uint32_t numParticles = cloth.gridsize.x * cloth.gridsize.y;
-      uint32_t workgroupSizeX = 10; // 匹配 shader 中的 local_size_x
-      uint32_t numWorkgroupsX =
-          (numParticles + workgroupSizeX - 1) / workgroupSizeX;
-      vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
+    // Stage 1: Constraint solving
+    // Iterate over all parallel sets and solve constraints
+    const uint32_t numParallelSets =
+        static_cast<uint32_t>(compute.elemParallelSlots.size()) - 1;
+    const uint32_t constraintIterations = 1;
 
-      // Barrier after begin solve
-      addComputeToComputeBarriers(cmdBuffer, readSet);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      compute.pipelines.solve);
 
-      // Stage 1: Constraint solving (computeStage = 1)
-      // Iterate over all parallel sets and solve constraints
-      const uint32_t numParallelSets =
-          static_cast<uint32_t>(compute.elemParallelSlots.size()) - 1;
-      const uint32_t constraintIterations = 1;
+    PushConstants pushConsts{};
+    for (uint32_t iter = 0; iter < constraintIterations; iter++) {
+      // Iterate over all parallel sets
+      for (uint32_t setIdx = 0; setIdx < numParallelSets; setIdx++) {
+        pushConsts.parallelSetStartIndex = setIdx;
+        vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                           sizeof(PushConstants), &pushConsts);
 
-      for (uint32_t iter = 0; iter < constraintIterations; iter++) {
-        // Ping-pong buffers for each iteration
-        // 每次迭代开始时切换 readSet: 0→1 或 1→0
-        // 这样可以在 input 和 output 之间交替读写，避免数据竞争
-        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                compute.pipelineLayout, 0, 1,
-                                &compute.descriptorSets[readSet], 0, 0);
+        // Dispatch for this parallel set
+        uint32_t setStart = compute.elemParallelSlots[setIdx];
+        uint32_t setEnd = compute.elemParallelSlots[setIdx + 1];
+        uint32_t setSize = setEnd - setStart;
 
-        // Iterate over all parallel sets
-        for (uint32_t setIdx = 0; setIdx < numParallelSets; setIdx++) {
-          pushConsts.computeStage = 1;
-          pushConsts.parallelSetStartIndex = setIdx;
-          vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
-                             VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                             sizeof(PushConstants), &pushConsts);
+        uint32_t workgroupSizeXSet = 10;
+        uint32_t numWorkgroupsXSet =
+            (setSize + workgroupSizeXSet - 1) / workgroupSizeXSet;
+        vkCmdDispatch(cmdBuffer, numWorkgroupsXSet, 1, 1);
 
-          // Dispatch for this parallel set
-          // Calculate number of elements in this set
-          uint32_t setStart = compute.elemParallelSlots[setIdx];
-          uint32_t setEnd = compute.elemParallelSlots[setIdx + 1];
-          uint32_t setSize = setEnd - setStart;
-
-          // Dispatch based on element count
-          // 工作组大小是 local_size_x = 10 (1D)
-          // 工作组数量 = (setSize + 9) / 10
-          uint32_t workgroupSizeX = 10; // 匹配 shader 中的 local_size_x
-          uint32_t numWorkgroupsX =
-              (setSize + workgroupSizeX - 1) / workgroupSizeX;
-          vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
-
-          // Barrier between parallel sets within same iteration
-          if (setIdx < numParallelSets - 1) {
-            addComputeToComputeBarriers(cmdBuffer, readSet);
-          }
-        }
-
-        // Barrier between constraint iterations
-        if (iter < constraintIterations - 1) {
-          addComputeToComputeBarriers(cmdBuffer, readSet);
+        // Barrier between parallel sets within same iteration
+        if (setIdx < numParallelSets - 1) {
+          addComputeToComputeBarriers(cmdBuffer);
         }
       }
 
-      // Stage 2: End solve (computeStage = 2)
-      // Update velocities based on position changes
-      // After Stage 1, readSet points to the buffer containing predicted
-      // positions We need to read from that buffer (particleIn) and write
-      // velocities to the other buffer (particleOut) No need to change readSet
-      // - keep it as is after Stage 1 After 1 iteration of Stage 1, readSet=1:
-      // particleIn=output, particleOut=input
-
-      pushConsts.computeStage = 2;
-      pushConsts.parallelSetStartIndex = 0;
-      // readSet is already correct from Stage 1, don't override it
-      vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                              compute.pipelineLayout, 0, 1,
-                              &compute.descriptorSets[readSet], 0, 0);
-      vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
-                         VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants),
-                         &pushConsts);
-
-      // Dispatch for all particles
-      // 工作组大小是 local_size_x = 10 (1D)
-      // 总粒子数 = gridsize.x * gridsize.y = 60 * 60 = 3600
-      // 需要的线程数 = 3600
-      // 工作组数量 = (3600 + 9) / 10 = 360
-      uint32_t numParticlesStage2 = cloth.gridsize.x * cloth.gridsize.y;
-      uint32_t workgroupSizeXStage2 = 10; // 匹配 shader 中的 local_size_x
-      uint32_t numWorkgroupsXStage2 =
-          (numParticlesStage2 + workgroupSizeXStage2 - 1) /
-          workgroupSizeXStage2;
-      vkCmdDispatch(cmdBuffer, numWorkgroupsXStage2, 1, 1);
-
-      // Release the storage buffers back to the graphics queue
-      addComputeToGraphicsBarriers(cmdBuffer, VK_ACCESS_SHADER_WRITE_BIT, 0,
-                                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                   VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-
-      // After Stage 2, toggle readSet for next frame's Stage 0 to read from
-      // correct buffer Stage 2 写入到 input (readSet=1: particleOut=input)
-      // 所以下一帧的 Stage 0 应该从 input 读取，即使用 readSet=0
-      // (readSet=0: particleIn=input, particleOut=output)
-      persistentReadSet = 1 - readSet;
+      // Barrier between constraint iterations
+      if (iter < constraintIterations - 1) {
+        addComputeToComputeBarriers(cmdBuffer);
+      }
     }
+
+    // Stage 2: End solve
+    // Update velocities based on position changes and write to particleOut
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      compute.pipelines.end);
+
+    // Dispatch for all particles
+    uint32_t numParticlesStage2 = cloth.gridsize.x * cloth.gridsize.y;
+    uint32_t workgroupSizeXStage2 = 10;
+    uint32_t numWorkgroupsXStage2 =
+        (numParticlesStage2 + workgroupSizeXStage2 - 1) / workgroupSizeXStage2;
+    vkCmdDispatch(cmdBuffer, numWorkgroupsXStage2, 1, 1);
+
+    // Release the storage buffers back to the graphics queue
+    addComputeToGraphicsBarriers(cmdBuffer, VK_ACCESS_SHADER_WRITE_BIT, 0,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
     vkEndCommandBuffer(cmdBuffer);
   }

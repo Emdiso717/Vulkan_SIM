@@ -1,0 +1,115 @@
+#version 450
+
+struct Particle {
+	vec4 pos;
+	vec4 vel;
+	vec4 uv;
+	vec4 normal;
+};
+
+layout(std430, binding = 0) buffer ParticleIn {
+	Particle particleIn[ ];
+};
+
+layout(std430, binding = 1) buffer ParticleOut {
+	Particle particleOut[ ];
+};
+
+layout (local_size_x = 10) in;
+
+layout (binding = 2) uniform UBO 
+{
+	float deltaT;
+	float particleMass;
+	float springStiffness;
+	float damping;
+	float restDistH;
+	float restDistV;
+	float restDistD;
+	float sphereRadius;
+	vec4 spherePos;
+	vec4 gravity;
+	ivec2 particleCount;
+} params;
+
+struct ElementInfo {
+  int elemId;
+  ivec2 pid;
+  float restLength;
+};
+
+layout(std430, binding = 3) buffer LambdaBuffer {
+  float _lambda[];
+};
+
+layout(std430, binding = 4) buffer ElementInfoBuffer {
+  ElementInfo elementInfo[];
+};
+
+layout(std430, binding = 5) buffer ElemParallelSlotsBuffer {
+  int elemParallelSlots[];
+};
+
+// Kept for pipeline layout compatibility with the solve stage
+layout (push_constant) uniform PushConsts {
+	uint parallelSetStartIndex;
+} pushConsts;
+
+bool isc(uint pid) {
+	return pid == 0 || pid == 59;
+}
+
+void main() 
+{
+	uvec3 id = gl_GlobalInvocationID; 
+	uint index = id.x;
+	uint numParticles = params.particleCount.x * params.particleCount.y;
+	if (index >= numParticles) {
+		return;
+	}
+
+	vec3 pos = particleIn[index].pos.xyz;
+
+	if (index < particleIn.length()) {
+		particleIn[index].vel.xyz = float(1 - float(isc(index))) *
+		             (particleIn[index].pos.xyz - particleIn[index].vel.xyz) / (params.deltaT);
+		particleOut[index].pos = particleIn[index].pos;
+		particleOut[index].vel = particleIn[index].vel;
+	}
+
+	// Derive logical 2D coordinates from linear index for boundary checks
+	uint x = index % uint(params.particleCount.x);
+	uint y = index / uint(params.particleCount.x);
+
+	vec3 normal = vec3(0.0);
+	vec3 a, b, c;
+	if (y > 0) {
+		if (x > 0) {
+			a = particleIn[index - 1].pos.xyz - pos;
+			b = particleIn[index - uint(params.particleCount.x) - 1].pos.xyz - pos;
+			c = particleIn[index - uint(params.particleCount.x)].pos.xyz - pos;
+			normal += cross(a,b) + cross(b,c);
+		}
+		if (x < uint(params.particleCount.x - 1)) {
+			a = particleIn[index - uint(params.particleCount.x)].pos.xyz - pos;
+			b = particleIn[index - uint(params.particleCount.x) + 1].pos.xyz - pos;
+			c = particleIn[index + 1].pos.xyz - pos;
+			normal += cross(a,b) + cross(b,c);
+		}
+	}
+	if (y < uint(params.particleCount.y - 1)) {
+		if (x > 0) {
+			a = particleIn[index + uint(params.particleCount.x)].pos.xyz - pos;
+			b = particleIn[index + uint(params.particleCount.x) - 1].pos.xyz - pos;
+			c = particleIn[index - 1].pos.xyz - pos;
+			normal += cross(a,b) + cross(b,c);
+		}
+		if (x < uint(params.particleCount.x - 1)) {
+			a = particleIn[index + 1].pos.xyz - pos;
+			b = particleIn[index + uint(params.particleCount.x) + 1].pos.xyz - pos;
+			c = particleIn[index + uint(params.particleCount.x)].pos.xyz - pos;
+			normal += cross(a,b) + cross(b,c);
+		}
+	}
+	particleOut[index].normal = vec4(normalize(normal), 0.0f);
+}

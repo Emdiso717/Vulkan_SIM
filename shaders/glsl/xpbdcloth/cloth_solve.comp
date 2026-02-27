@@ -1,0 +1,95 @@
+#version 450
+
+struct Particle {
+	vec4 pos;
+	vec4 vel;
+	vec4 uv;
+	vec4 normal;
+};
+
+layout(std430, binding = 0) buffer ParticleIn {
+	Particle particleIn[ ];
+};
+
+layout(std430, binding = 1) buffer ParticleOut {
+	Particle particleOut[ ];
+};
+
+layout (local_size_x = 10) in;
+
+layout (binding = 2) uniform UBO 
+{
+	float deltaT;
+	float particleMass;
+	float springStiffness;
+	float damping;
+	float restDistH;
+	float restDistV;
+	float restDistD;
+	float sphereRadius;
+	vec4 spherePos;
+	vec4 gravity;
+	ivec2 particleCount;
+} params;
+
+struct ElementInfo {
+  int elemId;
+  ivec2 pid;
+  float restLength;
+};
+
+layout(std430, binding = 3) buffer LambdaBuffer {
+  float _lambda[];
+};
+
+layout(std430, binding = 4) buffer ElementInfoBuffer {
+  ElementInfo elementInfo[];
+};
+
+layout(std430, binding = 5) buffer ElemParallelSlotsBuffer {
+  int elemParallelSlots[];
+};
+
+layout (push_constant) uniform PushConsts {
+	uint parallelSetStartIndex;
+} pushConsts;
+
+bool isc(uint pid) {
+	return pid == 0 || pid == 59;
+}
+
+void main() 
+{
+	uvec3 id = gl_GlobalInvocationID; 
+	uint index = id.x;
+
+	int st = elemParallelSlots[int(pushConsts.parallelSetStartIndex)];
+	int ed = elemParallelSlots[int(pushConsts.parallelSetStartIndex) + 1];
+	if (int(index) + st >= ed) {
+		return;
+	}
+
+	const int elemId = int(index) + st;
+	const ElementInfo elemInfo = elementInfo[elemId];
+
+	const float invDt = float(1) / (params.deltaT);
+	const float invDt2 = invDt * invDt;
+
+	mat2x3 localV;
+	vec2 localMassInv;
+	localV[0] = particleIn[elemInfo.pid[0]].pos.xyz;
+	localV[1] = particleIn[elemInfo.pid[1]].pos.xyz;
+	localMassInv[0] = 1.0 / params.particleMass;
+	localMassInv[1] = 1.0 / params.particleMass;
+	float local_alpha = float(1.0) / (params.springStiffness * invDt2);
+	float DLambda = -(length(localV[1] - localV[0]) - elemInfo.restLength) /
+	              (localMassInv[0] + localMassInv[1] + local_alpha);
+	_lambda[elemId] += DLambda;
+
+	particleIn[elemInfo.pid[0]].pos.xyz += 
+	  float(1.0 - float(isc(uint(elemInfo.pid[0])))) *
+	  localMassInv[0] * DLambda * normalize(localV[0] - localV[1]);
+	particleIn[elemInfo.pid[1]].pos.xyz += 
+	  float(1.0 - float(isc(uint(elemInfo.pid[1])))) *
+	  localMassInv[1] * DLambda * normalize(localV[1] - localV[0]);
+}
