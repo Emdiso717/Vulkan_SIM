@@ -53,7 +53,6 @@ bool isc(uint pid) { return pid == 0 || pid == 59; }
 void main() {
   uvec3 id = gl_GlobalInvocationID;
   uint index = id.x;
-  uint numParticles = params.particleCount.x * params.particleCount.y;
 
   if (index < particleIn.length()) {
     vec3 dx = particleIn[index].vel.xyz * (params.deltaT);

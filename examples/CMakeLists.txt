@@ -90,6 +90,7 @@ set(EXAMPLES
 	computecloth
 	xpbd
 	xpbdcloth
+	ridcloth
 )
 
 buildExamples()

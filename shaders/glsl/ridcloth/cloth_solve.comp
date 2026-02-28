@@ -1,0 +1,112 @@
+#version 450
+
+struct Particle {
+  vec4 pos;
+  vec4 vel;
+  vec4 uv;
+  vec4 normal;
+};
+
+layout(std430, binding = 0) buffer ParticleIn { Particle particleIn[]; };
+
+layout(std430, binding = 1) buffer ParticleOut { Particle particleOut[]; };
+
+layout(local_size_x = 10) in;
+
+layout(binding = 2) uniform UBO {
+  float deltaT;
+  float particleMass;
+  float springStiffness;
+  float damping;
+  float restDistH;
+  float restDistV;
+  float restDistD;
+  float sphereRadius;
+  vec4 spherePos;
+  vec4 gravity;
+  ivec2 particleCount;
+}
+params;
+
+struct ElementInfo {
+  int elemId;
+  ivec2 pid;
+  float restLength;
+};
+
+layout(std430, binding = 3) buffer LambdaBuffer { float _lambda[]; };
+
+layout(std430, binding = 4) buffer ElementInfoBuffer {
+  ElementInfo elementInfo[];
+};
+
+layout(std430, binding = 5) buffer ElemParallelSlotsBuffer {
+  int elemParallelSlots[];
+};
+
+layout(push_constant) uniform PushConsts { uint parallelSetStartIndex; }
+pushConsts;
+
+bool isc(uint pid) { return pid == 0 || pid == 59; }
+
+void main() {
+  uint idx = gl_GlobalInvocationID.x;
+
+  int st = elemParallelSlots[int(pushConsts.parallelSetStartIndex)];
+  int ed = elemParallelSlots[int(pushConsts.parallelSetStartIndex) + 1];
+
+  if (int(idx) + st >= ed)
+    return;
+
+  const int elemId = int(idx) + st;
+  const ElementInfo elemInfo = elementInfo[elemId];
+
+  const float invDt = float(1) / params.deltaT;
+  const float invDt2 = invDt * invDt;
+
+  const float localLambda = _lambda[elemId];
+  mat2x3 localV;
+  vec2 localMassInv;
+  localMassInv[0] = 1.0 / params.particleMass;
+  localMassInv[1] = 1.0 / params.particleMass;
+  localV[0] = particleIn[elemInfo.pid[0]].pos.xyz;
+  localV[1] = particleIn[elemInfo.pid[1]].pos.xyz;
+  const float E = params.springStiffness;
+  const float l0 = elemInfo.restLength;
+
+  const float eps = float(1e-10);
+  vec3 d = localV[1] - localV[0];
+  float l = length(d);
+  vec3 n = d / (l + eps);
+  vec3 F1 = (E * (l - l0) / l0) * n;
+  vec3 F0 = -F1;
+
+  mat3 I = mat3(1.0);
+  mat3 n_nt = outerProduct(n, n);
+  const float axial_coeff = E / l0;
+  const float geometric_coeff = E * (l - l0) / (l0 * l);
+  mat3 hes00 = (axial_coeff - geometric_coeff) * n_nt + geometric_coeff * I;
+
+  const float localHesNorm =
+      2.0 * sqrt(dot(hes00[0], hes00[0]) + dot(hes00[1], hes00[1]) +
+                 dot(hes00[2], hes00[2]));
+
+  const float localFNorm = sqrt(2.0 * dot(F0, F0));
+  F0 *= -1.0 / (localFNorm + eps);
+  F1 *= -1.0 / (localFNorm + eps);
+  const float divisor =
+      (localMassInv[0] * dot(F0, F0) + localMassInv[1] * dot(F1, F1)) *
+          localHesNorm +
+      invDt2;
+
+  const float localDeltaLambda = -(localFNorm + localLambda * invDt2) / divisor;
+
+  _lambda[elemId] = localLambda + localDeltaLambda;
+
+  particleIn[elemInfo.pid[0]].pos.xyz +=
+      float(1 - float(isc(uint(elemInfo.pid[0])))) * -localMassInv[0] *
+      localDeltaLambda * F0;
+  particleIn[elemInfo.pid[1]].pos.xyz +=
+      float(1 - float(isc(uint(elemInfo.pid[1])))) * -localMassInv[1] *
+      localDeltaLambda * F1;
+}

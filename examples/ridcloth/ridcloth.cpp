@@ -1,3 +1,4 @@
+#include <algorithm>
 #ifdef _WIN32
 #pragma comment(linker, "/subsystem:console")
 #endif
@@ -501,9 +502,9 @@ public:
 
     // Rendering pipeline
     std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
-        loadShader(getShadersPath() + "xpbdcloth/cloth.vert.spv",
+        loadShader(getShadersPath() + "ridcloth/cloth.vert.spv",
                    VK_SHADER_STAGE_VERTEX_BIT),
-        loadShader(getShadersPath() + "xpbdcloth/cloth.frag.spv",
+        loadShader(getShadersPath() + "ridcloth/cloth.frag.spv",
                    VK_SHADER_STAGE_FRAGMENT_BIT)};
 
     VkGraphicsPipelineCreateInfo pipelineCreateInfo =
@@ -558,9 +559,9 @@ public:
     inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     inputAssemblyState.primitiveRestartEnable = VK_FALSE;
     rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
-    shaderStages = {loadShader(getShadersPath() + "xpbdcloth/sphere.vert.spv",
+    shaderStages = {loadShader(getShadersPath() + "ridcloth/sphere.vert.spv",
                                VK_SHADER_STAGE_VERTEX_BIT),
-                    loadShader(getShadersPath() + "xpbdcloth/sphere.frag.spv",
+                    loadShader(getShadersPath() + "ridcloth/sphere.frag.spv",
                                VK_SHADER_STAGE_FRAGMENT_BIT)};
     VK_CHECK_RESULT(vkCreateGraphicsPipelines(device, pipelineCache, 1,
                                               &pipelineCreateInfo, nullptr,
@@ -767,21 +768,21 @@ public:
         vks::initializers::computePipelineCreateInfo(compute.pipelineLayout, 0);
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "xpbdcloth/cloth_begin.comp.spv",
+        loadShader(getShadersPath() + "ridcloth/cloth_begin.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(
         device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
         &compute.pipelines.begin));
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "xpbdcloth/cloth_solve.comp.spv",
+        loadShader(getShadersPath() + "ridcloth/cloth_solve.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(
         device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
         &compute.pipelines.solve));
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "xpbdcloth/cloth_end.comp.spv",
+        loadShader(getShadersPath() + "ridcloth/cloth_end.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1,
                                              &computePipelineCreateInfo,
