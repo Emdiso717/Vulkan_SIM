@@ -1,0 +1,146 @@
+#version 450
+
+struct Particle {
+  vec4 pos;
+  vec4 vel;
+  vec4 uv;
+  vec4 normal;
+};
+
+layout(std430, binding = 0) buffer ParticleIn { Particle particleIn[]; };
+
+layout(std430, binding = 1) buffer ParticleOut { Particle particleOut[]; };
+
+layout(local_size_x = 10) in;
+
+layout(binding = 2) uniform UBO {
+  float deltaT;
+  float density;
+  vec4 gravity;
+  vec4 lame;
+  ivec2 particleCount;
+}
+params;
+
+struct ElementInfo {
+  int elemId;
+  float restVol;
+  ivec4 pid;
+  mat2x2 restShape;
+  mat2x2 restShapeInv;
+};
+
+layout(std430, binding = 3) buffer LambdaDBuffer { float _lambdaD[]; };
+
+layout(std430, binding = 4) buffer ElementInfoBuffer {
+  ElementInfo elementInfo[];
+};
+
+layout(std430, binding = 5) buffer ElemParallelSlotsBuffer {
+  int elemParallelSlots[];
+};
+
+layout(std430, binding = 6) buffer MassesBuffer { float masses[]; };
+layout(std430, binding = 7) buffer LambdaHBuffer { float _lambdaH[]; };
+layout(std430, binding = 8) buffer FixedPointBuffer { int fixedPoints[]; };
+
+layout(push_constant) uniform PushConsts { uint parallelSetStartIndex; }
+pushConsts;
+
+bool isc(uint pid) {
+  for (int i = 0; i < fixedPoints.length(); i++) {
+    if (pid == uint(fixedPoints[i])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void main() {
+  uvec3 id = gl_GlobalInvocationID;
+  uint index = id.x;
+
+  int st = elemParallelSlots[int(pushConsts.parallelSetStartIndex)];
+  int ed = elemParallelSlots[int(pushConsts.parallelSetStartIndex) + 1];
+  if (int(index) + st >= ed) {
+    return;
+  }
+
+  const int elemId = int(index) + st;
+  const ElementInfo elemInfo = elementInfo[elemId];
+  const float invDt = float(1) / params.deltaT;
+  const float invDt2 = invDt * invDt;
+
+  vec3 localMassInv;
+  localMassInv[0] = 1.0 / masses[elemInfo.pid[0]];
+  localMassInv[1] = 1.0 / masses[elemInfo.pid[1]];
+  localMassInv[2] = 1.0 / masses[elemInfo.pid[2]];
+
+  mat3x2 localX;
+  localX[0] = particleIn[elemInfo.pid[0]].pos.xy;
+  localX[1] = particleIn[elemInfo.pid[1]].pos.xy;
+  localX[2] = particleIn[elemInfo.pid[2]].pos.xy;
+  mat2 D;
+  D[0] = localX[1] - localX[0];
+  D[1] = localX[2] - localX[0];
+  mat2 B = elemInfo.restShapeInv;
+  mat2 F = D * B;
+
+  const float C_H = determinant(F) - 1;
+  const mat2 par_det_F = (C_H + 1) * transpose(inverse(F));
+  const mat2 CH_H = par_det_F * transpose(B);
+  mat3x2 par_CH;
+  par_CH[0] = -CH_H[0] - CH_H[1];
+  par_CH[1] = CH_H[0];
+  par_CH[2] = CH_H[1];
+  const float sum_par_CH = localMassInv[0] * dot(par_CH[0], par_CH[0]) +
+                           localMassInv[1] * dot(par_CH[1], par_CH[1]) +
+                           localMassInv[2] * dot(par_CH[2], par_CH[2]);
+
+  const float alpha_tilde_H = float(1) / (params.lame[0]) * invDt2;
+  float C_D = dot(F[0], F[0]) + dot(F[1], F[1]) - 2;
+
+  const mat2 CD_H = float(2) * F * transpose(B);
+  mat3x2 par_CD;
+  par_CD[0] = -CD_H[0] - CD_H[1];
+  par_CD[1] = CD_H[0];
+  par_CD[2] = CD_H[1];
+
+  const float sum_par_CD = localMassInv[0] * dot(par_CD[0], par_CD[0]) +
+                           localMassInv[1] * dot(par_CD[1], par_CD[1]) +
+                           localMassInv[2] * dot(par_CD[2], par_CD[2]);
+
+  const float alpha_tilde_D = float(1) / (params.lame[1]) * invDt2;
+
+  float sum_par_CDH = localMassInv[0] * dot(par_CH[0], par_CD[0]) +
+                      localMassInv[1] * dot(par_CH[1], par_CD[1]) +
+                      localMassInv[2] * dot(par_CH[2], par_CD[2]);
+
+  const float delta_lambda_H =
+      (sum_par_CDH * (C_D + alpha_tilde_D * _lambdaD[elemId]) -
+       (C_H + alpha_tilde_H * _lambdaH[elemId]) *
+           (alpha_tilde_D + sum_par_CD)) /
+      ((alpha_tilde_H + sum_par_CH) * (alpha_tilde_D + sum_par_CD) -
+       sum_par_CDH * sum_par_CDH);
+
+  const float delta_lambda_D =
+      -(C_D + alpha_tilde_D * _lambdaD[elemId] + sum_par_CDH * delta_lambda_H) /
+      (alpha_tilde_D + sum_par_CD);
+
+  // update lambda
+  _lambdaH[elemId] += delta_lambda_H;
+  _lambdaD[elemId] += delta_lambda_D;
+
+  // update positions
+  particleIn[elemInfo.pid[0]].pos.xy +=
+      float(1 - float(isc(elemInfo.pid[0]))) * localMassInv[0] *
+      (par_CH[0] * delta_lambda_H + par_CD[0] * delta_lambda_D);
+
+  particleIn[elemInfo.pid[1]].pos.xy +=
+      float(1 - float(isc(elemInfo.pid[1]))) * localMassInv[1] *
+      (par_CH[1] * delta_lambda_H + par_CD[1] * delta_lambda_D);
+
+  particleIn[elemInfo.pid[2]].pos.xy +=
+      float(1 - float(isc(elemInfo.pid[2]))) * localMassInv[2] *
+      (par_CH[2] * delta_lambda_H + par_CD[2] * delta_lambda_D);
+}

@@ -1275,6 +1275,9 @@ void vkglTF::Model::loadFromFile(std::string filename, vks::VulkanDevice *device
 		}
 	}
 
+	cpuVertices = vertexBuffer;
+	cpuIndices = indexBuffer;
+
 	size_t vertexBufferSize = vertexBuffer.size() * sizeof(Vertex);
 	size_t indexBufferSize = indexBuffer.size() * sizeof(uint32_t);
 	indices.count = static_cast<uint32_t>(indexBuffer.size());
