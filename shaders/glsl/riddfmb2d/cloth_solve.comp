@@ -1,0 +1,337 @@
+#version 450
+
+struct Particle {
+  vec4 pos;
+  vec4 vel;
+  vec4 uv;
+  vec4 normal;
+};
+
+layout(std430, binding = 0) buffer ParticleIn { Particle particleIn[]; };
+
+layout(std430, binding = 1) buffer ParticleOut { Particle particleOut[]; };
+
+layout(local_size_x = 64) in;
+
+layout(binding = 2) uniform UBO {
+  float deltaT;
+  float density;
+  vec4 gravity;
+  vec4 lame;
+  ivec2 particleCount;
+}
+params;
+
+struct ElementInfo {
+  int elemId;
+  float restVol;
+  ivec4 pid;
+  mat2x2 restShape;
+  mat2x2 restShapeInv;
+};
+
+layout(std430, binding = 3) buffer LambdaDBuffer { float _lambdaD[]; };
+
+layout(std430, binding = 4) buffer ElementInfoBuffer {
+  ElementInfo elementInfo[];
+};
+
+layout(std430, binding = 5) buffer ElemParallelSlotsBuffer {
+  int elemParallelSlots[];
+};
+
+layout(std430, binding = 6) buffer MassesBuffer { float masses[]; };
+layout(std430, binding = 7) buffer LambdaHBuffer { float _lambdaH[]; };
+layout(std430, binding = 8) buffer FixedPointBuffer { int fixedPoints[]; };
+
+layout(push_constant) uniform PushConsts { uint parallelSetStartIndex; }
+pushConsts;
+
+void tet_rest_stable_neohookean_2d_jac(out vec2 jac0, out vec2 jac1,
+                                       out vec2 jac2, in mat3x2 V,
+                                       in mat2 F0inv, in float vol0,
+                                       in vec2 lame) {
+  float tt1;  // temp variable tt1
+  float tt2;  // temp variable tt2
+  float tt3;  // temp variable tt3
+  float tt4;  // temp variable tt4
+  float tt5;  // temp variable tt5
+  float tt6;  // temp variable tt6
+  float tt7;  // temp variable tt7
+  float tt8;  // temp variable tt8
+  float tt9;  // temp variable tt9
+  float tt10; // temp variable tt10
+  float tt11; // temp variable tt11
+  float tt12; // temp variable tt12
+  float tt13; // temp variable tt13
+  float tt14; // temp variable tt14
+  float tt15; // temp variable tt15
+  float tt16; // temp variable tt16
+  float tt17; // temp variable tt17
+  float tt18; // temp variable tt18
+  float tt19; // temp variable tt19
+  tt1 = -F0inv[0][1] - F0inv[0][0];
+  tt2 = -V[0][0];
+  tt3 = V[1][0] + tt2;
+  tt4 = V[2][0] + tt2;
+  tt5 = tt4 * F0inv[0][1] + F0inv[0][0] * tt3;
+  tt6 = -F0inv[1][1] - F0inv[1][0];
+  tt7 = tt4 * F0inv[1][1] + F0inv[1][0] * tt3;
+  tt8 = -V[0][1];
+  tt9 = V[1][1] + tt8;
+  tt10 = V[2][1] + tt8;
+  tt11 = F0inv[0][1] * tt10 + F0inv[0][0] * tt9;
+  tt12 = F0inv[1][1] * tt10 + F0inv[1][0] * tt9;
+  tt13 = tt1 * tt12 - tt6 * tt11;
+  tt14 = tt5 * tt12 - tt7 * tt11 - 1;
+  tt15 = tt5 * tt6 - tt1 * tt7;
+  tt16 = F0inv[0][0] * tt12 - F0inv[1][0] * tt11;
+  tt17 = F0inv[1][0] * tt5 - F0inv[0][0] * tt7;
+  tt18 = F0inv[0][1] * tt12 - F0inv[1][1] * tt11;
+  tt19 = tt5 * F0inv[1][1] - F0inv[0][1] * tt7;
+  jac0[0] = vol0 * (float(1.0E+0) * lame[0] * tt13 * tt14 - lame[1] * tt13 +
+                    float(5.0E-1) * lame[1] * (2 * tt6 * tt7 + 2 * tt1 * tt5));
+  jac0[1] =
+      vol0 * (float(5.0E-1) * lame[1] * (2 * tt6 * tt12 + 2 * tt1 * tt11) +
+              float(1.0E+0) * lame[0] * tt15 * tt14 - lame[1] * tt15);
+  jac1[0] = vol0 * (float(1.0E+0) * lame[0] * tt16 * tt14 - lame[1] * tt16 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[1][0] * tt7 + 2 * F0inv[0][0] * tt5));
+  jac1[1] = vol0 * (float(1.0E+0) * lame[0] * tt17 * tt14 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[1][0] * tt12 + 2 * F0inv[0][0] * tt11) -
+                    lame[1] * tt17);
+  jac2[0] = vol0 * (float(1.0E+0) * lame[0] * tt18 * tt14 - lame[1] * tt18 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[1][1] * tt7 + 2 * F0inv[0][1] * tt5));
+  jac2[1] = vol0 * (float(5.0E-1) * lame[1] *
+                        (2 * F0inv[1][1] * tt12 + 2 * F0inv[0][1] * tt11) +
+                    float(1.0E+0) * lame[0] * tt19 * tt14 - lame[1] * tt19);
+}
+
+float myPow(in float base, in int exp) { return base * base; }
+
+void tet_rest_stable_neohookean_2d_hes(out mat2 hes00, out mat2 hes01,
+                                       out mat2 hes02, out mat2 hes11,
+                                       out mat2 hes12, out mat2 hes22,
+                                       in mat3x2 V, in mat2 F0inv,
+                                       in float vol0, in vec2 lame) {
+  float tt1;  // temp variable tt1
+  float tt2;  // temp variable tt2
+  float tt3;  // temp variable tt3
+  float tt4;  // temp variable tt4
+  float tt5;  // temp variable tt5
+  float tt6;  // temp variable tt6
+  float tt7;  // temp variable tt7
+  float tt8;  // temp variable tt8
+  float tt9;  // temp variable tt9
+  float tt10; // temp variable tt10
+  float tt11; // temp variable tt11
+  float tt12; // temp variable tt12
+  float tt13; // temp variable tt13
+  float tt14; // temp variable tt14
+  float tt15; // temp variable tt15
+  float tt16; // temp variable tt16
+  float tt17; // temp variable tt17
+  float tt18; // temp variable tt18
+  float tt19; // temp variable tt19
+  float tt20; // temp variable tt20
+  float tt21; // temp variable tt21
+  float tt22; // temp variable tt22
+  float tt23; // temp variable tt23
+  float tt24; // temp variable tt24
+  float tt25; // temp variable tt25
+  float tt26; // temp variable tt26
+  float tt27; // temp variable tt27
+  float tt28; // temp variable tt28
+  float tt29; // temp variable tt29
+  float tt30; // temp variable tt30
+  float tt31; // temp variable tt31
+  float tt32; // temp variable tt32
+  float tt33; // temp variable tt33
+  float tt34; // temp variable tt34
+  float tt35; // temp variable tt35
+  float tt36; // temp variable tt36
+  float tt37; // temp variable tt37
+  float tt38; // temp variable tt38
+  float tt39; // temp variable tt39
+  float tt40; // temp variable tt40
+  float tt41; // temp variable tt41
+  float tt42; // temp variable tt42
+  float tt43; // temp variable tt43
+  float tt44; // temp variable tt44
+  float tt45; // temp variable tt45
+  float tt46; // temp variable tt46
+  tt1 = -F0inv[0][1] - F0inv[0][0];
+  tt2 = -F0inv[1][1] - F0inv[1][0];
+  tt3 = float(5.0E-1) * lame[1] * (2 * myPow(tt2, 2) + 2 * myPow(tt1, 2));
+  tt4 = -V[0][1];
+  tt5 = V[1][1] + tt4;
+  tt6 = V[2][1] + tt4;
+  tt7 = F0inv[0][1] * tt6 + F0inv[0][0] * tt5;
+  tt8 = F0inv[1][1] * tt6 + F0inv[1][0] * tt5;
+  tt9 = tt1 * tt8 - tt2 * tt7;
+  tt10 = -V[0][0];
+  tt11 = V[1][0] + tt10;
+  tt12 = V[2][0] + tt10;
+  tt13 = tt12 * F0inv[0][1] + F0inv[0][0] * tt11;
+  tt14 = tt12 * F0inv[1][1] + F0inv[1][0] * tt11;
+  tt15 = tt13 * tt2 - tt1 * tt14;
+  tt16 = float(1.0E+0) * lame[0] * vol0 * tt15 * tt9;
+  tt17 =
+      float(5.0E-1) * lame[1] * (2 * F0inv[1][0] * tt2 + 2 * F0inv[0][0] * tt1);
+  tt18 = F0inv[0][0] * tt8 - F0inv[1][0] * tt7;
+  tt19 = vol0 * (float(1.0E+0) * lame[0] * tt18 * tt9 + tt17);
+  tt20 = F0inv[1][0] * tt1 - F0inv[0][0] * tt2;
+  tt21 = F0inv[1][0] * tt13 - F0inv[0][0] * tt14;
+  tt22 = tt13 * tt8 - tt14 * tt7 - 1;
+  tt23 = vol0 * (float(1.0E+0) * lame[0] * tt20 * tt22 +
+                 float(1.0E+0) * lame[0] * tt21 * tt9 - lame[1] * tt20);
+  tt24 =
+      float(5.0E-1) * lame[1] * (2 * tt2 * F0inv[1][1] + 2 * tt1 * F0inv[0][1]);
+  tt25 = F0inv[0][1] * tt8 - F0inv[1][1] * tt7;
+  tt26 = vol0 * (float(1.0E+0) * lame[0] * tt9 * tt25 + tt24);
+  tt27 = tt1 * F0inv[1][1] - F0inv[0][1] * tt2;
+  tt28 = tt13 * F0inv[1][1] - F0inv[0][1] * tt14;
+  tt29 = vol0 * (float(1.0E+0) * lame[0] * tt27 * tt22 +
+                 float(1.0E+0) * lame[0] * tt28 * tt9 - lame[1] * tt27);
+  tt30 = F0inv[0][0] * tt2 - F0inv[1][0] * tt1;
+  tt31 = vol0 * (float(1.0E+0) * lame[0] * tt30 * tt22 +
+                 float(1.0E+0) * lame[0] * tt15 * tt18 - lame[1] * tt30);
+  tt32 = vol0 * (float(1.0E+0) * lame[0] * tt21 * tt15 + tt17);
+  tt33 = F0inv[0][1] * tt2 - tt1 * F0inv[1][1];
+  tt34 = vol0 * (float(1.0E+0) * lame[0] * tt33 * tt22 +
+                 float(1.0E+0) * lame[0] * tt15 * tt25 - lame[1] * tt33);
+  tt35 = vol0 * (float(1.0E+0) * lame[0] * tt15 * tt28 + tt24);
+  tt36 = float(5.0E-1) *
+         (2 * myPow(F0inv[1][0], 2) + 2 * myPow(F0inv[0][0], 2)) * lame[1];
+  tt37 = float(1.0E+0) * lame[0] * vol0 * tt21 * tt18;
+  tt38 = float(5.0E-1) * lame[1] *
+         (2 * F0inv[1][0] * F0inv[1][1] + 2 * F0inv[0][0] * F0inv[0][1]);
+  tt39 = vol0 * (float(1.0E+0) * lame[0] * tt18 * tt25 + tt38);
+  tt40 = F0inv[0][0] * F0inv[1][1] - F0inv[1][0] * F0inv[0][1];
+  tt41 = vol0 * (float(1.0E+0) * lame[0] * tt40 * tt22 +
+                 float(1.0E+0) * lame[0] * tt28 * tt18 - lame[1] * tt40);
+  tt42 = F0inv[1][0] * F0inv[0][1] - F0inv[0][0] * F0inv[1][1];
+  tt43 = vol0 * (float(1.0E+0) * lame[0] * tt42 * tt22 +
+                 float(1.0E+0) * lame[0] * tt21 * tt25 - lame[1] * tt42);
+  tt44 = vol0 * (float(1.0E+0) * lame[0] * tt21 * tt28 + tt38);
+  tt45 = float(5.0E-1) * lame[1] *
+         (2 * myPow(F0inv[1][1], 2) + 2 * myPow(F0inv[0][1], 2));
+  tt46 = float(1.0E+0) * lame[0] * vol0 * tt28 * tt25;
+  hes00[0][0] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt9, 2) + tt3);
+  hes00[1][0] = tt16;
+  hes01[0][0] = tt19;
+  hes01[1][0] = tt23;
+  hes02[0][0] = tt26;
+  hes02[1][0] = tt29;
+  hes00[0][1] = tt16;
+  hes00[1][1] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt15, 2) + tt3);
+  hes01[0][1] = tt31;
+  hes01[1][1] = tt32;
+  hes02[0][1] = tt34;
+  hes02[1][1] = tt35;
+  hes11[0][0] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt18, 2) + tt36);
+  hes11[1][0] = tt37;
+  hes12[0][0] = tt39;
+  hes12[1][0] = tt41;
+  hes11[0][1] = tt37;
+  hes11[1][1] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt21, 2) + tt36);
+  hes12[0][1] = tt43;
+  hes12[1][1] = tt44;
+  hes22[0][0] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt25, 2) + tt45);
+  hes22[1][0] = tt46;
+  hes22[0][1] = tt46;
+  hes22[1][1] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt28, 2) + tt45);
+}
+
+float mat2SquaredNorm(in mat2 m) {
+  mat2 tmp = m * transpose(m);
+  return tmp[0][0] + tmp[1][1];
+}
+
+float tet_rest_stable_neohookean_2d_hesNorm(in mat3x2 V, in mat2 F0inv,
+                                            in float vol0, in vec2 lame) {
+  mat2 hes00, hes01, hes02, hes11, hes12, hes22;
+  tet_rest_stable_neohookean_2d_hes(hes00, hes01, hes02, hes11, hes12, hes22, V,
+                                    F0inv, vol0, lame);
+
+  float norm = mat2SquaredNorm(hes00) + mat2SquaredNorm(hes11) +
+               mat2SquaredNorm(hes22) +
+               2 * (mat2SquaredNorm(hes01) + mat2SquaredNorm(hes02) +
+                    mat2SquaredNorm(hes12));
+  norm = sqrt(norm);
+  return norm;
+}
+
+void main() {
+  uvec3 id = gl_GlobalInvocationID;
+  uint index = id.x;
+
+  int st = elemParallelSlots[int(pushConsts.parallelSetStartIndex)];
+  int ed = elemParallelSlots[int(pushConsts.parallelSetStartIndex) + 1];
+  if (int(index) + st >= ed) {
+    return;
+  }
+
+  const int elemIdx = int(index) + st;
+
+  const float invDt = float(1) / params.deltaT;
+  const float invDt2 = invDt * invDt;
+
+  ElementInfo elemInfo = elementInfo[elemIdx];
+  mat3x2 localV;
+  localV[0] = particleIn[elemInfo.pid[0]].pos.xy;
+  localV[1] = particleIn[elemInfo.pid[1]].pos.xy;
+  localV[2] = particleIn[elemInfo.pid[2]].pos.xy;
+  vec2 localF0, localF1, localF2;
+  tet_rest_stable_neohookean_2d_jac(localF0, localF1, localF2, localV,
+                                    elemInfo.restShapeInv, elemInfo.restVol,
+                                    params.lame.xy);
+  localF0 = -localF0;
+  localF1 = -localF1;
+  localF2 = -localF2;
+
+  vec3 localMassInv;
+  localMassInv[0] = 1.0 / masses[elemInfo.pid[0]];
+  localMassInv[1] = 1.0 / masses[elemInfo.pid[1]];
+  localMassInv[2] = 1.0 / masses[elemInfo.pid[2]];
+
+  float localHesNorm = tet_rest_stable_neohookean_2d_hesNorm(
+      localV, elemInfo.restShapeInv, elemInfo.restVol, params.lame.xy);
+
+  const float localLambda = _lambdaD[elemIdx];
+  const float localFNorm = sqrt(dot(localF0, localF0) + dot(localF1, localF1) +
+                                dot(localF2, localF2));
+
+  const float EPS = float(1e-8);
+  // normalize local Force
+  localF0 /= (localFNorm + EPS);
+  localF1 /= (localFNorm + EPS);
+  localF2 /= (localFNorm + EPS);
+
+  const float fenMu = localHesNorm * (localMassInv[0] * dot(localF0, localF0) +
+                                      localMassInv[1] * dot(localF1, localF1) +
+                                      localMassInv[2] * dot(localF2, localF2)) +
+                      invDt2;
+
+  const float localDeltaLambda = -(localFNorm + localLambda * invDt2) / fenMu;
+
+  localF0 *= -localMassInv[0] * localDeltaLambda;
+  localF1 *= -localMassInv[1] * localDeltaLambda;
+  localF2 *= -localMassInv[2] * localDeltaLambda;
+
+  // update lambdas
+  _lambdaD[elemIdx] += localDeltaLambda;
+
+  particleIn[elemInfo.pid[0]].pos.xy +=
+      float(1 - fixedPoints[elemInfo.pid[0]]) * localF0;
+
+  particleIn[elemInfo.pid[1]].pos.xy +=
+      float(1 - fixedPoints[elemInfo.pid[1]]) * localF1;
+
+  particleIn[elemInfo.pid[2]].pos.xy +=
+      float(1 - fixedPoints[elemInfo.pid[2]]) * localF2;
+
+  // update positions
+}

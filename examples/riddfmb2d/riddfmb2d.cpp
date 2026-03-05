@@ -502,9 +502,9 @@ public:
 
     // Rendering pipeline
     std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
-        loadShader(getShadersPath() + "xpbddfmb2d/beam2d.vert.spv",
+        loadShader(getShadersPath() + "riddfmb2d/beam2d.vert.spv",
                    VK_SHADER_STAGE_VERTEX_BIT),
-        loadShader(getShadersPath() + "xpbddfmb2d/beam2d.frag.spv",
+        loadShader(getShadersPath() + "riddfmb2d/beam2d.frag.spv",
                    VK_SHADER_STAGE_FRAGMENT_BIT)};
 
     VkGraphicsPipelineCreateInfo pipelineCreateInfo =
@@ -760,21 +760,21 @@ public:
         vks::initializers::computePipelineCreateInfo(compute.pipelineLayout, 0);
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "xpbddfmb2d/cloth_begin.comp.spv",
+        loadShader(getShadersPath() + "riddfmb2d/cloth_begin.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(
         device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
         &compute.pipelines.begin));
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "xpbddfmb2d/cloth_solve.comp.spv",
+        loadShader(getShadersPath() + "riddfmb2d/cloth_solve.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(
         device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
         &compute.pipelines.solve));
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "xpbddfmb2d/cloth_end.comp.spv",
+        loadShader(getShadersPath() + "riddfmb2d/cloth_end.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1,
                                              &computePipelineCreateInfo,
@@ -824,7 +824,7 @@ public:
 
   void updateComputeUBO() {
     if (!paused) {
-      compute.uniformData.deltaT = fmin(frameTimer, 0.005) * 0.8;
+      compute.uniformData.deltaT = fmin(frameTimer, 0.008) * 0.8;
     } else {
       compute.uniformData.deltaT = 0.0f;
     }

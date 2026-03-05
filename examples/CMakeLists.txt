@@ -92,6 +92,7 @@ set(EXAMPLES
 	xpbdcloth
 	ridcloth
 	xpbddfmb2d
+	riddfmb2d
 )
 
 buildExamples()
