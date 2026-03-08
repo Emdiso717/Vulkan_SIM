@@ -477,7 +477,7 @@ public:
     // Pipeline
     VkPipelineInputAssemblyStateCreateInfo inputAssemblyState =
         vks::initializers::pipelineInputAssemblyStateCreateInfo(
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, 0, VK_TRUE);
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, VK_TRUE);
     VkPipelineRasterizationStateCreateInfo rasterizationState =
         vks::initializers::pipelineRasterizationStateCreateInfo(
             VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE,
