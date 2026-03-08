@@ -87,12 +87,12 @@ function(buildExamples)
 endfunction(buildExamples)
 
 set(EXAMPLES
-	computecloth
-	xpbd
 	xpbdcloth
 	ridcloth
 	xpbddfmb2d
 	riddfmb2d
+	xpbddfmb3d
+	riddfmb3d
 )
 
 buildExamples()

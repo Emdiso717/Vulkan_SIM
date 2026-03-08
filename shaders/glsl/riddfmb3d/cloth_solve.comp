@@ -1,0 +1,670 @@
+#version 450
+
+struct Particle {
+  vec4 pos;
+  vec4 vel;
+  vec4 uv;
+  vec4 normal;
+};
+
+layout(std430, binding = 0) buffer ParticleIn { Particle particleIn[]; };
+
+layout(std430, binding = 1) buffer ParticleOut { Particle particleOut[]; };
+
+layout(local_size_x = 64) in;
+
+layout(binding = 2) uniform UBO {
+  float deltaT;
+  float density;
+  vec4 gravity;
+  vec4 lame;
+  ivec2 particleCount;
+}
+params;
+
+struct ElementInfo {
+  int elemId;
+  float restVol;
+  ivec4 pid;
+  mat3x3 restShape;
+  mat3x3 restShapeInv;
+};
+
+layout(std430, binding = 3) buffer LambdaDBuffer { float _lambdaD[]; };
+
+layout(std430, binding = 4) buffer ElementInfoBuffer {
+  ElementInfo elementInfo[];
+};
+
+layout(std430, binding = 5) buffer ElemParallelSlotsBuffer {
+  int elemParallelSlots[];
+};
+
+layout(std430, binding = 6) buffer MassesBuffer { float masses[]; };
+layout(std430, binding = 7) buffer LambdaHBuffer { float _lambdaH[]; };
+layout(std430, binding = 8) buffer FixedPointBuffer { int fixedPoints[]; };
+
+layout(push_constant) uniform PushConsts { uint parallelSetStartIndex; }
+pushConsts;
+
+bool isc(uint pid) {
+  if (fixedPoints[pid] == 1) {
+    return true;
+  } else {
+    return false;
+  }
+}
+float myPow(in float base, in int exp) { return base * base; }
+
+float mat3squaredNorm(in mat3 m) {
+  return dot(m[0], m[0]) + dot(m[1], m[1]) + dot(m[2], m[2]);
+}
+
+void tet_rest_stable_neohookean_3d_jac(out vec3 jac0, out vec3 jac1,
+                                       out vec3 jac2, out vec3 jac3,
+                                       in mat4x3 V, in mat3 F0inv,
+                                       in float vol0, in vec2 lame) {
+  float tt1 = -F0inv[0][2] - F0inv[0][1] - F0inv[0][0];
+  float tt2 = -V[0][0];
+  float tt3 = V[1][0] + tt2;
+  float tt4 = V[2][0] + tt2;
+  float tt5 = V[3][0] + tt2;
+  float tt6 = tt5 * F0inv[0][2] + tt4 * F0inv[0][1] + F0inv[0][0] * tt3;
+  float tt7 = -F0inv[1][2] - F0inv[1][1] - F0inv[1][0];
+  float tt8 = tt5 * F0inv[1][2] + tt4 * F0inv[1][1] + F0inv[1][0] * tt3;
+  float tt9 = -F0inv[2][2] - F0inv[2][1] - F0inv[2][0];
+  float tt10 = tt5 * F0inv[2][2] + tt4 * F0inv[2][1] + tt3 * F0inv[2][0];
+  float tt11 = -V[0][1];
+  float tt12 = V[1][1] + tt11;
+  float tt13 = V[2][1] + tt11;
+  float tt14 = V[3][1] + tt11;
+  float tt15 = tt14 * F0inv[1][2] + F0inv[1][1] * tt13 + F0inv[1][0] * tt12;
+  float tt16 = -V[0][2];
+  float tt17 = V[1][2] + tt16;
+  float tt18 = V[2][2] + tt16;
+  float tt19 = V[3][2] + tt16;
+  float tt20 = F0inv[0][2] * tt19 + F0inv[0][1] * tt18 + F0inv[0][0] * tt17;
+  float tt21 = tt14 * F0inv[0][2] + F0inv[0][1] * tt13 + F0inv[0][0] * tt12;
+  float tt22 = F0inv[1][2] * tt19 + F0inv[1][1] * tt18 + F0inv[1][0] * tt17;
+  float tt23 = tt21 * tt22 - tt15 * tt20;
+  float tt24 = tt14 * F0inv[2][2] + F0inv[2][1] * tt13 + F0inv[2][0] * tt12;
+  float tt25 = F0inv[2][2] * tt19 + F0inv[2][1] * tt18 + F0inv[2][0] * tt17;
+  float tt26 = tt21 * tt25 - tt24 * tt20;
+  float tt27 = tt15 * tt25 - tt24 * tt22;
+  float tt28 = tt1 * tt27 - tt7 * tt26 + tt9 * tt23;
+  float tt29 = tt6 * tt27 - tt8 * tt26 + tt10 * tt23 - 1;
+  float tt30 = tt6 * (tt7 * tt25 - tt9 * tt22) -
+               tt8 * (tt1 * tt25 - tt9 * tt20) +
+               tt10 * (tt1 * tt22 - tt7 * tt20);
+  float tt31 = tt6 * (tt15 * tt9 - tt7 * tt24) -
+               tt8 * (tt21 * tt9 - tt1 * tt24) +
+               (tt21 * tt7 - tt1 * tt15) * tt10;
+  float tt32 = F0inv[0][0] * tt27 - F0inv[1][0] * tt26 + F0inv[2][0] * tt23;
+  float tt33 = tt6 * (F0inv[1][0] * tt25 - F0inv[2][0] * tt22) -
+               tt8 * (F0inv[0][0] * tt25 - F0inv[2][0] * tt20) +
+               tt10 * (F0inv[0][0] * tt22 - F0inv[1][0] * tt20);
+  float tt34 = tt6 * (F0inv[2][0] * tt15 - F0inv[1][0] * tt24) -
+               tt8 * (F0inv[2][0] * tt21 - F0inv[0][0] * tt24) +
+               (F0inv[1][0] * tt21 - F0inv[0][0] * tt15) * tt10;
+  float tt35 = F0inv[0][1] * tt27 - F0inv[1][1] * tt26 + F0inv[2][1] * tt23;
+  float tt36 = tt6 * (F0inv[1][1] * tt25 - F0inv[2][1] * tt22) -
+               tt8 * (F0inv[0][1] * tt25 - F0inv[2][1] * tt20) +
+               tt10 * (F0inv[0][1] * tt22 - F0inv[1][1] * tt20);
+  float tt37 = tt6 * (F0inv[2][1] * tt15 - F0inv[1][1] * tt24) -
+               tt8 * (F0inv[2][1] * tt21 - F0inv[0][1] * tt24) +
+               (F0inv[1][1] * tt21 - F0inv[0][1] * tt15) * tt10;
+  float tt38 = F0inv[0][2] * tt27 - F0inv[1][2] * tt26 + F0inv[2][2] * tt23;
+  float tt39 = tt6 * (F0inv[1][2] * tt25 - F0inv[2][2] * tt22) -
+               tt8 * (F0inv[0][2] * tt25 - F0inv[2][2] * tt20) +
+               tt10 * (F0inv[0][2] * tt22 - F0inv[1][2] * tt20);
+  float tt40 = tt6 * (tt15 * F0inv[2][2] - F0inv[1][2] * tt24) -
+               tt8 * (tt21 * F0inv[2][2] - F0inv[0][2] * tt24) +
+               (tt21 * F0inv[1][2] - F0inv[0][2] * tt15) * tt10;
+  jac0[0] = vol0 * (float(1.0E+0) * lame[0] * tt28 * tt29 - lame[1] * tt28 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * tt9 * tt10 + 2 * tt7 * tt8 + 2 * tt1 * tt6));
+  jac0[1] = vol0 * (float(1.0E+0) * lame[0] * tt30 * tt29 - lame[1] * tt30 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * tt9 * tt24 + 2 * tt7 * tt15 + 2 * tt1 * tt21));
+  jac0[2] = vol0 * (float(1.0E+0) * lame[0] * tt31 * tt29 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * tt9 * tt25 + 2 * tt7 * tt22 + 2 * tt1 * tt20) -
+                    lame[1] * tt31);
+  jac1[0] = vol0 * (float(1.0E+0) * lame[0] * tt32 * tt29 - lame[1] * tt32 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[2][0] * tt10 + 2 * F0inv[1][0] * tt8 +
+                         2 * F0inv[0][0] * tt6));
+  jac1[1] = vol0 * (float(1.0E+0) * lame[0] * tt33 * tt29 - lame[1] * tt33 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[2][0] * tt24 + 2 * F0inv[1][0] * tt15 +
+                         2 * F0inv[0][0] * tt21));
+  jac1[2] = vol0 * (float(1.0E+0) * lame[0] * tt34 * tt29 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[2][0] * tt25 + 2 * F0inv[1][0] * tt22 +
+                         2 * F0inv[0][0] * tt20) -
+                    lame[1] * tt34);
+  jac2[0] = vol0 * (float(1.0E+0) * lame[0] * tt35 * tt29 - lame[1] * tt35 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[2][1] * tt10 + 2 * F0inv[1][1] * tt8 +
+                         2 * F0inv[0][1] * tt6));
+  jac2[1] = vol0 * (float(1.0E+0) * lame[0] * tt36 * tt29 - lame[1] * tt36 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[2][1] * tt24 + 2 * F0inv[1][1] * tt15 +
+                         2 * F0inv[0][1] * tt21));
+  jac2[2] = vol0 * (float(1.0E+0) * lame[0] * tt37 * tt29 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[2][1] * tt25 + 2 * F0inv[1][1] * tt22 +
+                         2 * F0inv[0][1] * tt20) -
+                    lame[1] * tt37);
+  jac3[0] = vol0 * (float(1.0E+0) * lame[0] * tt38 * tt29 - lame[1] * tt38 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[2][2] * tt10 + 2 * F0inv[1][2] * tt8 +
+                         2 * F0inv[0][2] * tt6));
+  jac3[1] = vol0 * (float(1.0E+0) * lame[0] * tt39 * tt29 - lame[1] * tt39 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[2][2] * tt24 + 2 * F0inv[1][2] * tt15 +
+                         2 * F0inv[0][2] * tt21));
+  jac3[2] = vol0 * (float(1.0E+0) * lame[0] * tt40 * tt29 +
+                    float(5.0E-1) * lame[1] *
+                        (2 * F0inv[2][2] * tt25 + 2 * F0inv[1][2] * tt22 +
+                         2 * F0inv[0][2] * tt20) -
+                    lame[1] * tt40);
+}
+
+void tet_rest_stable_neohookean_3d_hes(out mat3 hes00, out mat3 hes01,
+                                       out mat3 hes02, out mat3 hes03,
+                                       out mat3 hes11, out mat3 hes12,
+                                       out mat3 hes13, out mat3 hes22,
+                                       out mat3 hes23, out mat3 hes33,
+                                       in mat4x3 V, in mat3 F0inv,
+                                       in float vol0, in vec2 lame) {
+  float tt1 = -F0inv[0][2] - F0inv[0][1] - F0inv[0][0];
+  float tt2 = -F0inv[1][2] - F0inv[1][1] - F0inv[1][0];
+  float tt3 = -F0inv[2][2] - F0inv[2][1] - F0inv[2][0];
+  float tt4 = float(5.0E-1) * lame[1] *
+              (2 * myPow(tt3, 2) + 2 * myPow(tt2, 2) + 2 * myPow(tt1, 2));
+  float tt5 = -V[0][1];
+  float tt6 = V[1][1] + tt5;
+  float tt7 = V[2][1] + tt5;
+  float tt8 = V[3][1] + tt5;
+  float tt9 = tt8 * F0inv[1][2] + F0inv[1][1] * tt7 + F0inv[1][0] * tt6;
+  float tt10 = -V[0][2];
+  float tt11 = V[1][2] + tt10;
+  float tt12 = V[2][2] + tt10;
+  float tt13 = V[3][2] + tt10;
+  float tt14 = F0inv[0][2] * tt13 + F0inv[0][1] * tt12 + F0inv[0][0] * tt11;
+  float tt15 = tt8 * F0inv[0][2] + F0inv[0][1] * tt7 + F0inv[0][0] * tt6;
+  float tt16 = F0inv[1][2] * tt13 + F0inv[1][1] * tt12 + F0inv[1][0] * tt11;
+  float tt17 = tt15 * tt16 - tt9 * tt14;
+  float tt18 = tt8 * F0inv[2][2] + F0inv[2][1] * tt7 + F0inv[2][0] * tt6;
+  float tt19 = F0inv[2][2] * tt13 + F0inv[2][1] * tt12 + F0inv[2][0] * tt11;
+  float tt20 = tt15 * tt19 - tt18 * tt14;
+  float tt21 = tt9 * tt19 - tt18 * tt16;
+  float tt22 = tt1 * tt21 - tt2 * tt20 + tt3 * tt17;
+  float tt23 = tt1 * tt16 - tt2 * tt14;
+  float tt24 = tt1 * tt19 - tt3 * tt14;
+  float tt25 = tt2 * tt19 - tt3 * tt16;
+  float tt26 = tt1 * tt25 - tt2 * tt24 + tt3 * tt23;
+  float tt27 = -V[0][0];
+  float tt28 = V[1][0] + tt27;
+  float tt29 = V[2][0] + tt27;
+  float tt30 = V[3][0] + tt27;
+  float tt31 = tt30 * F0inv[2][2] + tt29 * F0inv[2][1] + tt28 * F0inv[2][0];
+  float tt32 = tt30 * F0inv[1][2] + tt29 * F0inv[1][1] + F0inv[1][0] * tt28;
+  float tt33 = tt30 * F0inv[0][2] + tt29 * F0inv[0][1] + F0inv[0][0] * tt28;
+  float tt34 = tt33 * tt25 - tt32 * tt24 + tt31 * tt23;
+  float tt35 = tt33 * tt21 - tt32 * tt20 + tt31 * tt17 - 1;
+  float tt36 = vol0 * (float(1.0E+0) * lame[0] * tt26 * tt35 +
+                       float(1.0E+0) * lame[0] * tt34 * tt22 - lame[1] * tt26);
+  float tt37 = tt15 * tt2 - tt1 * tt9;
+  float tt38 = tt15 * tt3 - tt1 * tt18;
+  float tt39 = tt9 * tt3 - tt2 * tt18;
+  float tt40 = tt1 * tt39 - tt2 * tt38 + tt37 * tt3;
+  float tt41 = tt33 * tt39 - tt32 * tt38 + tt37 * tt31;
+  float tt42 = vol0 * (float(1.0E+0) * lame[0] * tt40 * tt35 +
+                       float(1.0E+0) * lame[0] * tt41 * tt22 - lame[1] * tt40);
+  float tt43 =
+      float(5.0E-1) * lame[1] *
+      (2 * F0inv[2][0] * tt3 + 2 * F0inv[1][0] * tt2 + 2 * F0inv[0][0] * tt1);
+  float tt44 = F0inv[0][0] * tt21 - F0inv[1][0] * tt20 + F0inv[2][0] * tt17;
+  float tt45 = vol0 * (float(1.0E+0) * lame[0] * tt44 * tt22 + tt43);
+  float tt46 = F0inv[0][0] * tt16 - F0inv[1][0] * tt14;
+  float tt47 = F0inv[0][0] * tt19 - F0inv[2][0] * tt14;
+  float tt48 = F0inv[1][0] * tt19 - F0inv[2][0] * tt16;
+  float tt49 = tt1 * tt48 - tt2 * tt47 + tt3 * tt46;
+  float tt50 = tt33 * tt48 - tt32 * tt47 + tt31 * tt46;
+  float tt51 = vol0 * (float(1.0E+0) * lame[0] * tt49 * tt35 +
+                       float(1.0E+0) * lame[0] * tt50 * tt22 - lame[1] * tt49);
+  float tt52 = F0inv[1][0] * tt15 - F0inv[0][0] * tt9;
+  float tt53 = F0inv[2][0] * tt15 - F0inv[0][0] * tt18;
+  float tt54 = F0inv[2][0] * tt9 - F0inv[1][0] * tt18;
+  float tt55 = tt1 * tt54 - tt2 * tt53 + tt52 * tt3;
+  float tt56 = tt33 * tt54 - tt32 * tt53 + tt52 * tt31;
+  float tt57 = vol0 * (float(1.0E+0) * lame[0] * tt55 * tt35 +
+                       float(1.0E+0) * lame[0] * tt56 * tt22 - lame[1] * tt55);
+  float tt58 =
+      float(5.0E-1) * lame[1] *
+      (2 * F0inv[2][1] * tt3 + 2 * F0inv[1][1] * tt2 + 2 * F0inv[0][1] * tt1);
+  float tt59 = F0inv[0][1] * tt21 - F0inv[1][1] * tt20 + F0inv[2][1] * tt17;
+  float tt60 = vol0 * (float(1.0E+0) * lame[0] * tt59 * tt22 + tt58);
+  float tt61 = F0inv[0][1] * tt16 - F0inv[1][1] * tt14;
+  float tt62 = F0inv[0][1] * tt19 - F0inv[2][1] * tt14;
+  float tt63 = F0inv[1][1] * tt19 - F0inv[2][1] * tt16;
+  float tt64 = tt1 * tt63 - tt2 * tt62 + tt3 * tt61;
+  float tt65 = tt33 * tt63 - tt32 * tt62 + tt31 * tt61;
+  float tt66 = vol0 * (float(1.0E+0) * lame[0] * tt64 * tt35 +
+                       float(1.0E+0) * lame[0] * tt65 * tt22 - lame[1] * tt64);
+  float tt67 = F0inv[1][1] * tt15 - F0inv[0][1] * tt9;
+  float tt68 = F0inv[2][1] * tt15 - F0inv[0][1] * tt18;
+  float tt69 = F0inv[2][1] * tt9 - F0inv[1][1] * tt18;
+  float tt70 = tt1 * tt69 - tt2 * tt68 + tt67 * tt3;
+  float tt71 = tt33 * tt69 - tt32 * tt68 + tt67 * tt31;
+  float tt72 = vol0 * (float(1.0E+0) * lame[0] * tt70 * tt35 +
+                       float(1.0E+0) * lame[0] * tt71 * tt22 - lame[1] * tt70);
+  float tt73 =
+      float(5.0E-1) * lame[1] *
+      (2 * tt3 * F0inv[2][2] + 2 * tt2 * F0inv[1][2] + 2 * tt1 * F0inv[0][2]);
+  float tt74 = F0inv[0][2] * tt21 - F0inv[1][2] * tt20 + F0inv[2][2] * tt17;
+  float tt75 = vol0 * (float(1.0E+0) * lame[0] * tt22 * tt74 + tt73);
+  float tt76 = F0inv[0][2] * tt16 - F0inv[1][2] * tt14;
+  float tt77 = F0inv[0][2] * tt19 - F0inv[2][2] * tt14;
+  float tt78 = F0inv[1][2] * tt19 - F0inv[2][2] * tt16;
+  float tt79 = tt1 * tt78 - tt2 * tt77 + tt3 * tt76;
+  float tt80 = tt33 * tt78 - tt32 * tt77 + tt31 * tt76;
+  float tt81 = vol0 * (float(1.0E+0) * lame[0] * tt79 * tt35 +
+                       float(1.0E+0) * lame[0] * tt80 * tt22 - lame[1] * tt79);
+  float tt82 = tt15 * F0inv[1][2] - F0inv[0][2] * tt9;
+  float tt83 = tt15 * F0inv[2][2] - F0inv[0][2] * tt18;
+  float tt84 = tt9 * F0inv[2][2] - F0inv[1][2] * tt18;
+  float tt85 = tt1 * tt84 - tt2 * tt83 + tt82 * tt3;
+  float tt86 = tt33 * tt84 - tt32 * tt83 + tt82 * tt31;
+  float tt87 = vol0 * (float(1.0E+0) * lame[0] * tt85 * tt35 +
+                       float(1.0E+0) * lame[0] * tt86 * tt22 - lame[1] * tt85);
+  float tt88 = float(1.0E+0) * lame[0] * vol0 * tt41 * tt34;
+  float tt89 = F0inv[0][0] * tt25 - F0inv[1][0] * tt24 + F0inv[2][0] * tt23;
+  float tt90 = vol0 * (float(1.0E+0) * lame[0] * tt89 * tt35 +
+                       float(1.0E+0) * lame[0] * tt34 * tt44 - lame[1] * tt89);
+  float tt91 = vol0 * (float(1.0E+0) * lame[0] * tt50 * tt34 + tt43);
+  float tt92 = (F0inv[1][0] * tt1 - F0inv[0][0] * tt2) * tt31 +
+               tt33 * (F0inv[2][0] * tt2 - F0inv[1][0] * tt3) -
+               tt32 * (F0inv[2][0] * tt1 - F0inv[0][0] * tt3);
+  float tt93 = vol0 * (float(1.0E+0) * lame[0] * tt92 * tt35 +
+                       float(1.0E+0) * lame[0] * tt56 * tt34 - lame[1] * tt92);
+  float tt94 = F0inv[0][1] * tt25 - F0inv[1][1] * tt24 + F0inv[2][1] * tt23;
+  float tt95 = vol0 * (float(1.0E+0) * lame[0] * tt94 * tt35 +
+                       float(1.0E+0) * lame[0] * tt34 * tt59 - lame[1] * tt94);
+  float tt96 = vol0 * (float(1.0E+0) * lame[0] * tt65 * tt34 + tt58);
+  float tt97 = (F0inv[1][1] * tt1 - F0inv[0][1] * tt2) * tt31 +
+               tt33 * (F0inv[2][1] * tt2 - F0inv[1][1] * tt3) -
+               tt32 * (F0inv[2][1] * tt1 - F0inv[0][1] * tt3);
+  float tt98 = vol0 * (float(1.0E+0) * lame[0] * tt97 * tt35 +
+                       float(1.0E+0) * lame[0] * tt71 * tt34 - lame[1] * tt97);
+  float tt99 = F0inv[0][2] * tt25 - F0inv[1][2] * tt24 + F0inv[2][2] * tt23;
+  float tt100 = vol0 * (float(1.0E+0) * lame[0] * tt99 * tt35 +
+                        float(1.0E+0) * lame[0] * tt34 * tt74 - lame[1] * tt99);
+  float tt101 = vol0 * (float(1.0E+0) * lame[0] * tt34 * tt80 + tt73);
+  float tt102 = tt33 * (tt2 * F0inv[2][2] - F0inv[1][2] * tt3) -
+                tt32 * (tt1 * F0inv[2][2] - F0inv[0][2] * tt3) +
+                (tt1 * F0inv[1][2] - F0inv[0][2] * tt2) * tt31;
+  float tt103 =
+      vol0 * (float(1.0E+0) * lame[0] * tt102 * tt35 +
+              float(1.0E+0) * lame[0] * tt86 * tt34 - lame[1] * tt102);
+  float tt104 = F0inv[0][0] * tt39 - F0inv[1][0] * tt38 + F0inv[2][0] * tt37;
+  float tt105 =
+      vol0 * (float(1.0E+0) * lame[0] * tt104 * tt35 +
+              float(1.0E+0) * lame[0] * tt41 * tt44 - lame[1] * tt104);
+  float tt106 = (F0inv[0][0] * tt2 - F0inv[1][0] * tt1) * tt31 +
+                tt33 * (F0inv[1][0] * tt3 - F0inv[2][0] * tt2) -
+                tt32 * (F0inv[0][0] * tt3 - F0inv[2][0] * tt1);
+  float tt107 =
+      vol0 * (float(1.0E+0) * lame[0] * tt106 * tt35 +
+              float(1.0E+0) * lame[0] * tt41 * tt50 - lame[1] * tt106);
+  float tt108 = vol0 * (float(1.0E+0) * lame[0] * tt56 * tt41 + tt43);
+  float tt109 = F0inv[0][1] * tt39 - F0inv[1][1] * tt38 + F0inv[2][1] * tt37;
+  float tt110 =
+      vol0 * (float(1.0E+0) * lame[0] * tt109 * tt35 +
+              float(1.0E+0) * lame[0] * tt41 * tt59 - lame[1] * tt109);
+  float tt111 = (F0inv[0][1] * tt2 - F0inv[1][1] * tt1) * tt31 +
+                tt33 * (F0inv[1][1] * tt3 - F0inv[2][1] * tt2) -
+                tt32 * (F0inv[0][1] * tt3 - F0inv[2][1] * tt1);
+  float tt112 =
+      vol0 * (float(1.0E+0) * lame[0] * tt111 * tt35 +
+              float(1.0E+0) * lame[0] * tt41 * tt65 - lame[1] * tt111);
+  float tt113 = vol0 * (float(1.0E+0) * lame[0] * tt71 * tt41 + tt58);
+  float tt114 = F0inv[0][2] * tt39 - F0inv[1][2] * tt38 + tt37 * F0inv[2][2];
+  float tt115 =
+      vol0 * (float(1.0E+0) * lame[0] * tt114 * tt35 +
+              float(1.0E+0) * lame[0] * tt41 * tt74 - lame[1] * tt114);
+  float tt116 = tt33 * (F0inv[1][2] * tt3 - tt2 * F0inv[2][2]) -
+                tt32 * (F0inv[0][2] * tt3 - tt1 * F0inv[2][2]) +
+                (F0inv[0][2] * tt2 - tt1 * F0inv[1][2]) * tt31;
+  float tt117 =
+      vol0 * (float(1.0E+0) * lame[0] * tt116 * tt35 +
+              float(1.0E+0) * lame[0] * tt41 * tt80 - lame[1] * tt116);
+  float tt118 = vol0 * (float(1.0E+0) * lame[0] * tt41 * tt86 + tt73);
+  float tt119 = float(5.0E-1) *
+                (2 * myPow(F0inv[2][0], 2) + 2 * myPow(F0inv[1][0], 2) +
+                 2 * myPow(F0inv[0][0], 2)) *
+                lame[1];
+  float tt120 = F0inv[0][0] * tt48 - F0inv[1][0] * tt47 + F0inv[2][0] * tt46;
+  float tt121 =
+      vol0 * (float(1.0E+0) * lame[0] * tt120 * tt35 +
+              float(1.0E+0) * lame[0] * tt50 * tt44 - lame[1] * tt120);
+  float tt122 = F0inv[0][0] * tt54 - F0inv[1][0] * tt53 + F0inv[2][0] * tt52;
+  float tt123 =
+      vol0 * (float(1.0E+0) * lame[0] * tt122 * tt35 +
+              float(1.0E+0) * lame[0] * tt56 * tt44 - lame[1] * tt122);
+  float tt124 = float(5.0E-1) * lame[1] *
+                (2 * F0inv[2][0] * F0inv[2][1] + 2 * F0inv[1][0] * F0inv[1][1] +
+                 2 * F0inv[0][0] * F0inv[0][1]);
+  float tt125 = vol0 * (float(1.0E+0) * lame[0] * tt44 * tt59 + tt124);
+  float tt126 = F0inv[0][0] * tt63 - F0inv[1][0] * tt62 + F0inv[2][0] * tt61;
+  float tt127 =
+      vol0 * (float(1.0E+0) * lame[0] * tt126 * tt35 +
+              float(1.0E+0) * lame[0] * tt65 * tt44 - lame[1] * tt126);
+  float tt128 = F0inv[0][0] * tt69 - F0inv[1][0] * tt68 + F0inv[2][0] * tt67;
+  float tt129 =
+      vol0 * (float(1.0E+0) * lame[0] * tt128 * tt35 +
+              float(1.0E+0) * lame[0] * tt71 * tt44 - lame[1] * tt128);
+  float tt130 = float(5.0E-1) * lame[1] *
+                (2 * F0inv[2][0] * F0inv[2][2] + 2 * F0inv[1][0] * F0inv[1][2] +
+                 2 * F0inv[0][0] * F0inv[0][2]);
+  float tt131 = vol0 * (float(1.0E+0) * lame[0] * tt44 * tt74 + tt130);
+  float tt132 = F0inv[0][0] * tt78 - F0inv[1][0] * tt77 + F0inv[2][0] * tt76;
+  float tt133 =
+      vol0 * (float(1.0E+0) * lame[0] * tt132 * tt35 +
+              float(1.0E+0) * lame[0] * tt80 * tt44 - lame[1] * tt132);
+  float tt134 = F0inv[0][0] * tt84 - F0inv[1][0] * tt83 + F0inv[2][0] * tt82;
+  float tt135 =
+      vol0 * (float(1.0E+0) * lame[0] * tt134 * tt35 +
+              float(1.0E+0) * lame[0] * tt86 * tt44 - lame[1] * tt134);
+  float tt136 = float(1.0E+0) * lame[0] * vol0 * tt56 * tt50;
+  float tt137 = F0inv[0][1] * tt48 - F0inv[1][1] * tt47 + F0inv[2][1] * tt46;
+  float tt138 =
+      vol0 * (float(1.0E+0) * lame[0] * tt137 * tt35 +
+              float(1.0E+0) * lame[0] * tt50 * tt59 - lame[1] * tt137);
+  float tt139 = vol0 * (float(1.0E+0) * lame[0] * tt50 * tt65 + tt124);
+  float tt140 = (F0inv[0][0] * F0inv[1][1] - F0inv[1][0] * F0inv[0][1]) * tt31 -
+                (F0inv[0][0] * F0inv[2][1] - F0inv[2][0] * F0inv[0][1]) * tt32 +
+                (F0inv[1][0] * F0inv[2][1] - F0inv[2][0] * F0inv[1][1]) * tt33;
+  float tt141 =
+      vol0 * (float(1.0E+0) * lame[0] * tt140 * tt35 +
+              float(1.0E+0) * lame[0] * tt71 * tt50 - lame[1] * tt140);
+  float tt142 = F0inv[0][2] * tt48 - F0inv[1][2] * tt47 + F0inv[2][2] * tt46;
+  float tt143 =
+      vol0 * (float(1.0E+0) * lame[0] * tt142 * tt35 +
+              float(1.0E+0) * lame[0] * tt50 * tt74 - lame[1] * tt142);
+  float tt144 = vol0 * (float(1.0E+0) * lame[0] * tt50 * tt80 + tt130);
+  float tt145 = (F0inv[0][0] * F0inv[1][2] - F0inv[1][0] * F0inv[0][2]) * tt31 +
+                tt33 * (F0inv[1][0] * F0inv[2][2] - F0inv[2][0] * F0inv[1][2]) -
+                tt32 * (F0inv[0][0] * F0inv[2][2] - F0inv[2][0] * F0inv[0][2]);
+  float tt146 =
+      vol0 * (float(1.0E+0) * lame[0] * tt145 * tt35 +
+              float(1.0E+0) * lame[0] * tt86 * tt50 - lame[1] * tt145);
+  float tt147 = F0inv[0][1] * tt54 - F0inv[1][1] * tt53 + F0inv[2][1] * tt52;
+  float tt148 =
+      vol0 * (float(1.0E+0) * lame[0] * tt147 * tt35 +
+              float(1.0E+0) * lame[0] * tt56 * tt59 - lame[1] * tt147);
+  float tt149 = (F0inv[1][0] * F0inv[0][1] - F0inv[0][0] * F0inv[1][1]) * tt31 -
+                (F0inv[2][0] * F0inv[0][1] - F0inv[0][0] * F0inv[2][1]) * tt32 +
+                (F0inv[2][0] * F0inv[1][1] - F0inv[1][0] * F0inv[2][1]) * tt33;
+  float tt150 =
+      vol0 * (float(1.0E+0) * lame[0] * tt149 * tt35 +
+              float(1.0E+0) * lame[0] * tt56 * tt65 - lame[1] * tt149);
+  float tt151 = vol0 * (float(1.0E+0) * lame[0] * tt56 * tt71 + tt124);
+  float tt152 = F0inv[0][2] * tt54 - F0inv[1][2] * tt53 + tt52 * F0inv[2][2];
+  float tt153 =
+      vol0 * (float(1.0E+0) * lame[0] * tt152 * tt35 +
+              float(1.0E+0) * lame[0] * tt56 * tt74 - lame[1] * tt152);
+  float tt154 = (F0inv[1][0] * F0inv[0][2] - F0inv[0][0] * F0inv[1][2]) * tt31 +
+                tt33 * (F0inv[2][0] * F0inv[1][2] - F0inv[1][0] * F0inv[2][2]) -
+                tt32 * (F0inv[2][0] * F0inv[0][2] - F0inv[0][0] * F0inv[2][2]);
+  float tt155 =
+      vol0 * (float(1.0E+0) * lame[0] * tt154 * tt35 +
+              float(1.0E+0) * lame[0] * tt56 * tt80 - lame[1] * tt154);
+  float tt156 = vol0 * (float(1.0E+0) * lame[0] * tt56 * tt86 + tt130);
+  float tt157 = float(5.0E-1) * lame[1] *
+                (2 * myPow(F0inv[2][1], 2) + 2 * myPow(F0inv[1][1], 2) +
+                 2 * myPow(F0inv[0][1], 2));
+  float tt158 = F0inv[0][1] * tt63 - F0inv[1][1] * tt62 + F0inv[2][1] * tt61;
+  float tt159 =
+      vol0 * (float(1.0E+0) * lame[0] * tt158 * tt35 +
+              float(1.0E+0) * lame[0] * tt65 * tt59 - lame[1] * tt158);
+  float tt160 = F0inv[0][1] * tt69 - F0inv[1][1] * tt68 + F0inv[2][1] * tt67;
+  float tt161 =
+      vol0 * (float(1.0E+0) * lame[0] * tt160 * tt35 +
+              float(1.0E+0) * lame[0] * tt71 * tt59 - lame[1] * tt160);
+  float tt162 = float(5.0E-1) * lame[1] *
+                (2 * F0inv[2][1] * F0inv[2][2] + 2 * F0inv[1][1] * F0inv[1][2] +
+                 2 * F0inv[0][1] * F0inv[0][2]);
+  float tt163 = vol0 * (float(1.0E+0) * lame[0] * tt59 * tt74 + tt162);
+  float tt164 = F0inv[0][1] * tt78 - F0inv[1][1] * tt77 + F0inv[2][1] * tt76;
+  float tt165 =
+      vol0 * (float(1.0E+0) * lame[0] * tt164 * tt35 +
+              float(1.0E+0) * lame[0] * tt80 * tt59 - lame[1] * tt164);
+  float tt166 = F0inv[0][1] * tt84 - F0inv[1][1] * tt83 + F0inv[2][1] * tt82;
+  float tt167 =
+      vol0 * (float(1.0E+0) * lame[0] * tt166 * tt35 +
+              float(1.0E+0) * lame[0] * tt86 * tt59 - lame[1] * tt166);
+  float tt168 = float(1.0E+0) * lame[0] * vol0 * tt71 * tt65;
+  float tt169 = F0inv[0][2] * tt63 - F0inv[1][2] * tt62 + F0inv[2][2] * tt61;
+  float tt170 =
+      vol0 * (float(1.0E+0) * lame[0] * tt169 * tt35 +
+              float(1.0E+0) * lame[0] * tt65 * tt74 - lame[1] * tt169);
+  float tt171 = vol0 * (float(1.0E+0) * lame[0] * tt65 * tt80 + tt162);
+  float tt172 = tt33 * (F0inv[1][1] * F0inv[2][2] - F0inv[2][1] * F0inv[1][2]) -
+                tt32 * (F0inv[0][1] * F0inv[2][2] - F0inv[2][1] * F0inv[0][2]) +
+                (F0inv[0][1] * F0inv[1][2] - F0inv[1][1] * F0inv[0][2]) * tt31;
+  float tt173 =
+      vol0 * (float(1.0E+0) * lame[0] * tt172 * tt35 +
+              float(1.0E+0) * lame[0] * tt86 * tt65 - lame[1] * tt172);
+  float tt174 = F0inv[0][2] * tt69 - F0inv[1][2] * tt68 + tt67 * F0inv[2][2];
+  float tt175 =
+      vol0 * (float(1.0E+0) * lame[0] * tt174 * tt35 +
+              float(1.0E+0) * lame[0] * tt71 * tt74 - lame[1] * tt174);
+  float tt176 = tt33 * (F0inv[2][1] * F0inv[1][2] - F0inv[1][1] * F0inv[2][2]) -
+                tt32 * (F0inv[2][1] * F0inv[0][2] - F0inv[0][1] * F0inv[2][2]) +
+                (F0inv[1][1] * F0inv[0][2] - F0inv[0][1] * F0inv[1][2]) * tt31;
+  float tt177 =
+      vol0 * (float(1.0E+0) * lame[0] * tt176 * tt35 +
+              float(1.0E+0) * lame[0] * tt71 * tt80 - lame[1] * tt176);
+  float tt178 = vol0 * (float(1.0E+0) * lame[0] * tt71 * tt86 + tt162);
+  float tt179 = float(5.0E-1) * lame[1] *
+                (2 * myPow(F0inv[2][2], 2) + 2 * myPow(F0inv[1][2], 2) +
+                 2 * myPow(F0inv[0][2], 2));
+  float tt180 = F0inv[0][2] * tt78 - F0inv[1][2] * tt77 + F0inv[2][2] * tt76;
+  float tt181 =
+      vol0 * (float(1.0E+0) * lame[0] * tt180 * tt35 +
+              float(1.0E+0) * lame[0] * tt80 * tt74 - lame[1] * tt180);
+  float tt182 = F0inv[0][2] * tt84 - F0inv[1][2] * tt83 + tt82 * F0inv[2][2];
+  float tt183 =
+      vol0 * (float(1.0E+0) * lame[0] * tt182 * tt35 +
+              float(1.0E+0) * lame[0] * tt86 * tt74 - lame[1] * tt182);
+  float tt184 = float(1.0E+0) * lame[0] * vol0 * tt86 * tt80;
+  hes00[0][0] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt22, 2) + tt4);
+  hes00[1][0] = tt36;
+  hes00[2][0] = tt42;
+  hes01[0][0] = tt45;
+  hes01[1][0] = tt51;
+  hes01[2][0] = tt57;
+  hes02[0][0] = tt60;
+  hes02[1][0] = tt66;
+  hes02[2][0] = tt72;
+  hes03[0][0] = tt75;
+  hes03[1][0] = tt81;
+  hes03[2][0] = tt87;
+  hes00[0][1] = tt36;
+  hes00[1][1] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt34, 2) + tt4);
+  hes00[2][1] = tt88;
+  hes01[0][1] = tt90;
+  hes01[1][1] = tt91;
+  hes01[2][1] = tt93;
+  hes02[0][1] = tt95;
+  hes02[1][1] = tt96;
+  hes02[2][1] = tt98;
+  hes03[0][1] = tt100;
+  hes03[1][1] = tt101;
+  hes03[2][1] = tt103;
+  hes00[0][2] = tt42;
+  hes00[1][2] = tt88;
+  hes00[2][2] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt41, 2) + tt4);
+  hes01[0][2] = tt105;
+  hes01[1][2] = tt107;
+  hes01[2][2] = tt108;
+  hes02[0][2] = tt110;
+  hes02[1][2] = tt112;
+  hes02[2][2] = tt113;
+  hes03[0][2] = tt115;
+  hes03[1][2] = tt117;
+  hes03[2][2] = tt118;
+  hes11[0][0] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt44, 2) + tt119);
+  hes11[1][0] = tt121;
+  hes11[2][0] = tt123;
+  hes12[0][0] = tt125;
+  hes12[1][0] = tt127;
+  hes12[2][0] = tt129;
+  hes13[0][0] = tt131;
+  hes13[1][0] = tt133;
+  hes13[2][0] = tt135;
+  hes11[0][1] = tt121;
+  hes11[1][1] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt50, 2) + tt119);
+  hes11[2][1] = tt136;
+  hes12[0][1] = tt138;
+  hes12[1][1] = tt139;
+  hes12[2][1] = tt141;
+  hes13[0][1] = tt143;
+  hes13[1][1] = tt144;
+  hes13[2][1] = tt146;
+  hes11[0][2] = tt123;
+  hes11[1][2] = tt136;
+  hes11[2][2] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt56, 2) + tt119);
+  hes12[0][2] = tt148;
+  hes12[1][2] = tt150;
+  hes12[2][2] = tt151;
+  hes13[0][2] = tt153;
+  hes13[1][2] = tt155;
+  hes13[2][2] = tt156;
+  hes22[0][0] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt59, 2) + tt157);
+  hes22[1][0] = tt159;
+  hes22[2][0] = tt161;
+  hes23[0][0] = tt163;
+  hes23[1][0] = tt165;
+  hes23[2][0] = tt167;
+  hes22[0][1] = tt159;
+  hes22[1][1] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt65, 2) + tt157);
+  hes22[2][1] = tt168;
+  hes23[0][1] = tt170;
+  hes23[1][1] = tt171;
+  hes23[2][1] = tt173;
+  hes22[0][2] = tt161;
+  hes22[1][2] = tt168;
+  hes22[2][2] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt71, 2) + tt157);
+  hes23[0][2] = tt175;
+  hes23[1][2] = tt177;
+  hes23[2][2] = tt178;
+  hes33[0][0] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt74, 2) + tt179);
+  hes33[1][0] = tt181;
+  hes33[2][0] = tt183;
+  hes33[0][1] = tt181;
+  hes33[1][1] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt80, 2) + tt179);
+  hes33[2][1] = tt184;
+  hes33[0][2] = tt183;
+  hes33[1][2] = tt184;
+  hes33[2][2] = vol0 * (float(1.0E+0) * lame[0] * myPow(tt86, 2) + tt179);
+}
+
+void tet_rest_stable_neohookean_3d_hesNorm(out float norm, in mat4x3 V,
+                                           in mat3 F0inv, in float vol0,
+                                           in vec2 lame) {
+  mat3 hes00, hes01, hes02, hes03, hes11, hes12, hes13, hes22, hes23, hes33;
+  tet_rest_stable_neohookean_3d_hes(hes00, hes01, hes02, hes03, hes11, hes12,
+                                    hes13, hes22, hes23, hes33, V, F0inv, vol0,
+                                    lame);
+
+  norm = mat3squaredNorm(hes00) + mat3squaredNorm(hes11) +
+         mat3squaredNorm(hes22) + mat3squaredNorm(hes33) +
+         2 * (mat3squaredNorm(hes01) + mat3squaredNorm(hes02) +
+              mat3squaredNorm(hes03) + mat3squaredNorm(hes12) +
+              mat3squaredNorm(hes13) + mat3squaredNorm(hes23));
+
+  norm = sqrt(norm);
+}
+void main() {
+  uvec3 id = gl_GlobalInvocationID;
+  uint index = id.x;
+
+  int st = elemParallelSlots[int(pushConsts.parallelSetStartIndex)];
+  int ed = elemParallelSlots[int(pushConsts.parallelSetStartIndex) + 1];
+  if (int(index) + st >= ed) {
+    return;
+  }
+
+  const int elemId = int(index) + st;
+
+  const ElementInfo elem = elementInfo[elemId];
+  const float invDt = float(1) / params.deltaT;
+  const float invDt2 = invDt * invDt;
+
+  vec4 localMassInv;
+  localMassInv[0] = 1.0 / masses[elem.pid[0]];
+  localMassInv[1] = 1.0 / masses[elem.pid[1]];
+  localMassInv[2] = 1.0 / masses[elem.pid[2]];
+  localMassInv[3] = 1.0 / masses[elem.pid[3]];
+
+  mat4x3 localV;
+  localV[0] = particleIn[elem.pid[0]].pos.xyz;
+  localV[1] = particleIn[elem.pid[1]].pos.xyz;
+  localV[2] = particleIn[elem.pid[2]].pos.xyz;
+  localV[3] = particleIn[elem.pid[3]].pos.xyz;
+
+  vec3 localF0, localF1, localF2, localF3;
+  tet_rest_stable_neohookean_3d_jac(localF0, localF1, localF2, localF3, localV,
+                                    elem.restShapeInv, elem.restVol,
+                                    params.lame.xy);
+  localF0 = -localF0;
+  localF1 = -localF1;
+  localF2 = -localF2;
+  localF3 = -localF3;
+
+  float localHesNorm;
+  tet_rest_stable_neohookean_3d_hesNorm(localHesNorm, localV, elem.restShapeInv,
+                                        elem.restVol, params.lame.xy);
+  const float localLambda = _lambdaD[elemId];
+  const float localFNorm = sqrt(dot(localF0, localF0) + dot(localF1, localF1) +
+                                dot(localF2, localF2) + dot(localF3, localF3));
+
+  const float EPS = float(1e-8);
+  // normalize local Force
+  localF0 /= (localFNorm + EPS);
+  localF1 /= (localFNorm + EPS);
+  localF2 /= (localFNorm + EPS);
+  localF3 /= (localFNorm + EPS);
+
+  const float fenMu = localHesNorm * (localMassInv[0] * dot(localF0, localF0) +
+                                      localMassInv[1] * dot(localF1, localF1) +
+                                      localMassInv[2] * dot(localF2, localF2) +
+                                      localMassInv[3] * dot(localF3, localF3)) +
+                      invDt2;
+
+  const float localDeltaLambda = -(localFNorm + localLambda * invDt2) / fenMu;
+
+  localF0 *= -localMassInv[0] * localDeltaLambda;
+  localF1 *= -localMassInv[1] * localDeltaLambda;
+  localF2 *= -localMassInv[2] * localDeltaLambda;
+  localF3 *= -localMassInv[3] * localDeltaLambda;
+
+  // update lambdas
+  _lambdaD[elemId] += localDeltaLambda;
+
+  particleIn[elem.pid[0]].pos.xyz +=
+      float(1 - fixedPoints[elem.pid[0]]) * localF0;
+
+  particleIn[elem.pid[1]].pos.xyz +=
+      float(1 - fixedPoints[elem.pid[1]]) * localF1;
+
+  particleIn[elem.pid[2]].pos.xyz +=
+      float(1 - fixedPoints[elem.pid[2]]) * localF2;
+
+  particleIn[elem.pid[3]].pos.xyz +=
+      float(1 - fixedPoints[elem.pid[3]]) * localF3;
+}

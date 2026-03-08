@@ -10,6 +10,7 @@ project(${NAME})
 
 include_directories(external)
 include_directories(external/glm)
+include_directories(external/eigen)
 include_directories(external/gli)
 include_directories(external/imgui)
 include_directories(external/tinygltf)
