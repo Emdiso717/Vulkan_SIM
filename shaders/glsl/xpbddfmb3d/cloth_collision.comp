@@ -1,0 +1,70 @@
+#version 450
+
+struct Particle {
+  vec4 pos;
+  vec4 vel;
+  vec4 uv;
+  vec4 normal;
+};
+
+layout(std430, binding = 0) buffer ParticleIn { Particle particleIn[]; };
+layout(std430, binding = 1) buffer ParticleOut { Particle particleOut[]; };
+
+layout(local_size_x = 64) in;
+
+layout(binding = 2) uniform UBO {
+  float deltaT;
+  float density;
+  vec4 gravity;
+  vec4 lame;
+  ivec2 particleCount;
+}
+params;
+
+layout(std430, binding = 6) buffer MassesBuffer { float masses[]; };
+layout(std430, binding = 8) buffer FixedPointBuffer { int fixedPoints[]; };
+layout(std430, binding = 9) buffer LambdaCollisionBuffer {
+  float _lambdaCollision[];
+};
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  if (index >= particleIn.length() || fixedPoints[index] == 1)
+    return;
+
+  const float yLimit = -3.0;
+  vec3 p = particleIn[index].pos.xyz;
+
+  // 1. 约束函数 C(p) = y - yLimit >= 0
+  // 如果 C < 0，说明穿透了地面
+  float C = p.y - yLimit;
+
+  // XPBD 不等式约束：只有在违规时才计算
+  // 注意：如果之前已经有 lambda 了，即使 C > 0
+  // 也要参与计算（处理离开碰撞的情况） 但为了简单，通常只在 C < 0 时处理
+  if (C < 0.0) {
+    float w = 1.0 / max(masses[index], 0.001);
+
+    // 2. XPBD 参数
+    float dt = params.deltaT;
+    float alpha = 0.0; // 0 为刚体碰撞，> 0 为软地毯效果
+    float alphaTilde = alpha / (dt * dt);
+
+    // 3. 计算 deltaLambda (考虑累计 lambda)
+    float currentTotalLambda = _lambdaCollision[index];
+    float deltaLambda =
+        (-C - alphaTilde * currentTotalLambda) / (w + alphaTilde);
+
+    // 4. 更新累计 Lambda 并应用位移
+    _lambdaCollision[index] += deltaLambda;
+
+    // 5. 修正位置: p = p + Δλ * w * ∇C
+    // ∇C = (0, 1, 0)
+    p.y += deltaLambda * w;
+
+    particleIn[index].pos.xyz = p;
+  } else {
+    // 如果物体离开了地面，重置 Lambda
+    _lambdaCollision[index] = 0.0;
+  }
+}

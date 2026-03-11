@@ -57,7 +57,7 @@ task copyTask {
     copy {
        from rootProject.ext.assetPath + 'models'
        into 'assets/models'
-       include 'beam.vtk'
+       include 'beam.vtk','bunny.vtk'
     }
 }
 

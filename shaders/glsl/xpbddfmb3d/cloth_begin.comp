@@ -43,6 +43,9 @@ layout(std430, binding = 5) buffer ElemParallelSlotsBuffer {
 layout(std430, binding = 6) buffer MassesBuffer { float masses[]; };
 layout(std430, binding = 7) buffer LambdaHBuffer { float _lambdaH[]; };
 layout(std430, binding = 8) buffer FixedPointBuffer { int fixedPoints[]; };
+layout(std430, binding = 9) buffer LambdaCollisionBuffer {
+  float _lambdaCollision[];
+};
 
 layout(push_constant) uniform PushConsts { uint parallelSetStartIndex; }
 pushConsts;
@@ -64,6 +67,7 @@ void main() {
     dx += params.gravity.xyz * (params.deltaT) * (params.deltaT);
     particleIn[index].vel = particleIn[index].pos;
     particleIn[index].pos.xyz += float(1.0 - fixedPoints[index]) * dx;
+    _lambdaCollision[index] = 0;
   }
 
   if (index < _lambdaD.length()) {
