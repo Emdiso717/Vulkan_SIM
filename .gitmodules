@@ -5,3 +5,6 @@
 	path = assets
 	url = https://github.com/SaschaWillems/Vulkan-Assets
 	branch = main
+[submodule "external/eigen"]
+	path = external/eigen
+	url = https://gitlab.com/libeigen/eigen.git

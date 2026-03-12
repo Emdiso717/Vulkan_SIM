@@ -26,7 +26,7 @@ public:
   // called "async compute") These barriers will release and acquire the
   // resources used in graphics and compute between the different queue families
   bool dedicatedComputeQueue{false};
-
+  const float Iterations = 1.0f;
   vks::Texture2D textureCloth;
   vkglTF::Model modelSphere;
 
@@ -673,7 +673,7 @@ public:
     if (!paused) {
       // SRS - Clamp frameTimer to max 20ms refresh period (e.g. if blocked on
       // resize), otherwise image breakup can occur
-      compute.uniformData.deltaT = fmin(frameTimer, 0.02f) * 0.0025f;
+      compute.uniformData.deltaT = fmin(frameTimer, 0.02f) / Iterations;
 
       if (simulateWind) {
         std::default_random_engine rndEngine(
@@ -811,7 +811,7 @@ public:
                        &calculateNormals);
 
     // Dispatch the compute job
-    const uint32_t iterations = 64;
+    const uint32_t iterations = Iterations;
     for (uint32_t j = 0; j < iterations; j++) {
       readSet = 1 - readSet;
       vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,

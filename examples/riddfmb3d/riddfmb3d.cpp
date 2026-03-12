@@ -12,6 +12,12 @@ public:
   uint32_t indexCount{0};
   bool dedicatedComputeQueue{false};
 
+  const struct Configuration {
+    std::string modelPath = "models/bunny.vtk";
+    uint32_t numSolverIterations{8};
+    float timeScale{0.8f}; // deltaT = fmin(frameTimer, 0.05) * timeScale
+  } config;
+
   struct Particle {
     glm::vec4 pos;
     glm::vec4 vel;
@@ -74,7 +80,7 @@ public:
     struct UniformData {
       float deltaT{0.0f};
       float density{100.0f};
-      alignas(16) glm::vec4 gravity{0.0f, 9.8f, 0.0f, 0.0f};
+      alignas(16) glm::vec4 gravity{0.0f, -9.8f, 0.0f, 0.0f};
       glm::vec4 lame{1000000.0f, 1000000.0f, 0.0f, 0.0f};
       glm::ivec2 particleCount{0};
     } uniformData;
@@ -104,7 +110,7 @@ public:
     camera.type = Camera::CameraType::lookat;
     camera.setPerspective(60.0f, (float)width / (float)height, 0.1f, 512.0f);
     camera.setRotation(glm::vec3(-30.0f, -45.0f, 0.0f));
-    camera.setTranslation(glm::vec3(0.0f, 0.0f, -8.0f));
+    camera.setTranslation(glm::vec3(0.0f, -2.0f, -8.0f));
   }
 
   ~VulkanExample() {
@@ -572,30 +578,14 @@ public:
 
   void Boundarycondition() {
     uint32_t numParticles = static_cast<uint32_t>(beam3d.V.rows());
-    compute.fixedpoint.resize(numParticles);
-
-    double minX = beam3d.V(0, 0);
-    for (uint32_t i = 1; i < numParticles; ++i) {
-      double x = beam3d.V(i, 0);
-      if (x < minX)
-        minX = x;
-    }
-
-    const double tol = 0.01;
-    for (uint32_t i = 0; i < numParticles; ++i) {
-      if (beam3d.V(i, 0) <= minX + tol) {
-        compute.fixedpoint[i] = 1;
-      } else {
-        compute.fixedpoint[i] = 0;
-      }
-    }
+    compute.fixedpoint.resize(numParticles, 0);
   }
 
   void buildElementInfoFromMesh() {
 #if (_android_)
-    io::readMesh3d("models/beam.vtk", beam3d.V, beam3d.tets);
+    io::readMesh3d(config.modelPath, beam3d.V, beam3d.tets);
 #else
-    io::readMesh3d(getAssetPath() + "models/beam.vtk", beam3d.V, beam3d.tets);
+    io::readMesh3d(getAssetPath() + config.modelPath, beam3d.V, beam3d.tets);
 #endif
     io::internal::extractBoundary(beam3d.V, beam3d.tets, beam3d.tris);
     compute.elementInfo.clear();
@@ -875,7 +865,10 @@ public:
 
   void updateGraphicsUBO() {
     graphics.uniformData.projection = camera.matrices.perspective;
-    graphics.uniformData.view = camera.matrices.view;
+    const glm::mat4 flipY =
+        glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f));
+    // Flip model Y axis (model = flipY, modelview = view * model)
+    graphics.uniformData.view = camera.matrices.view * flipY;
     memcpy(graphics.uniformBuffers[currentBuffer].mapped, &graphics.uniformData,
            sizeof(Graphics::UniformData));
   }

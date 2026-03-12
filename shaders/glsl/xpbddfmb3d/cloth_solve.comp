@@ -89,6 +89,19 @@ void main() {
   mat3 B = elemInfo.restShapeInv;
   mat3 F = D * B;
 
+  // Robust determinant gradient:
+  // (det(F)) * transpose(inverse(F)) == transpose(adjugate(F))
+  // Avoid inverse(F) which can blow up near singular configurations (commonon
+  // mobile).
+  // const float detF = determinant(F);
+  // const float C_H = detF - 1;
+  // mat3 adjF;
+  // // GLSL mat3 is column-major: F[0],F[1],F[2] are columns.
+  // adjF[0] = cross(F[1], F[2]);
+  // adjF[1] = cross(F[2], F[0]);
+  // adjF[2] = cross(F[0], F[1]);
+  // const mat3 par_det_F = transpose(adjF);
+
   const float C_H = determinant(F) - 1;
   const mat3 par_det_F = (C_H + 1) * transpose(inverse(F));
   const mat3 CH_H = par_det_F * transpose(B);

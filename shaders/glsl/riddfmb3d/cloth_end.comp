@@ -59,10 +59,18 @@ void main() {
   uint index = id.x;
 
   if (index < particleIn.length()) {
+    float t = 1.0;
+    if (particleIn[index].vel.y < particleIn[index].pos.y) {
+      t = 0.98;
+    }
     particleIn[index].vel.xyz =
-        float(1 - fixedPoints[index]) *
+        t * float(1 - fixedPoints[index]) *
         (particleIn[index].pos.xyz - particleIn[index].vel.xyz) /
         (params.deltaT);
+    if (particleIn[index].pos.y < -3.0 && particleIn[index].vel.y < 0.0) {
+      particleIn[index].vel.y = -particleIn[index].vel.y;
+      particleIn[index].pos.y = -3.0;
+    }
     particleOut[index].pos = particleIn[index].pos;
     particleOut[index].vel = particleIn[index].vel;
     particleOut[index].uv = particleIn[index].uv;

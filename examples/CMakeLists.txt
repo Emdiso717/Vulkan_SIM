@@ -93,6 +93,7 @@ set(EXAMPLES
 	riddfmb2d
 	xpbddfmb3d
 	riddfmb3d
+	computecloth
 )
 
 buildExamples()
