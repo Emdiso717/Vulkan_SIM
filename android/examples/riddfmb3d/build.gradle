@@ -26,6 +26,7 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.debug
         }
     }
     externalNativeBuild {
@@ -57,7 +58,7 @@ task copyTask {
     copy {
        from rootProject.ext.assetPath + 'models'
        into 'assets/models'
-       include 'beam.vtk'
+       include 'beam.vtk','bunny.vtk'
     }
 }
 

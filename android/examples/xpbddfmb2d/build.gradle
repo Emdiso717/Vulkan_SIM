@@ -58,6 +58,11 @@ task copyTask {
        from rootProject.ext.assetPath + 'models'
        into 'assets/models'
        include 'beam.gltf'
+    }   
+ copy {
+       from rootProject.ext.assetPath + 'models'
+       into 'assets/models'
+       include 'beam.gltf'
     }
 }
 

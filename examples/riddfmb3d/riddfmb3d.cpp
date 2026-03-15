@@ -14,8 +14,9 @@ public:
 
   const struct Configuration {
     std::string modelPath = "models/bunny.vtk";
-    uint32_t numSolverIterations{8};
-    float timeScale{0.8f}; // deltaT = fmin(frameTimer, 0.05) * timeScale
+    uint32_t numSolverIterations{8}; // lower = more stable on mobile
+    float timeScale{0.6f}; // deltaT = fmin(frameTimer, 0.03) * timeScale,
+                           // conservative for mobile
   } config;
 
   struct Particle {
@@ -81,7 +82,8 @@ public:
       float deltaT{0.0f};
       float density{100.0f};
       alignas(16) glm::vec4 gravity{0.0f, -9.8f, 0.0f, 0.0f};
-      glm::vec4 lame{1000000.0f, 1000000.0f, 0.0f, 0.0f};
+      glm::vec4 lame{1000000.0f, 1000000.0f, 0.0f,
+                     0.0f}; // softer = more stable on mobile
       glm::ivec2 particleCount{0};
     } uniformData;
     std::vector<float> masses{};
@@ -442,7 +444,7 @@ public:
         vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                               maxConcurrentFrames * 3),
         vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                              maxConcurrentFrames * 8),
+                                              maxConcurrentFrames * 12),
         vks::initializers::descriptorPoolSize(
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             maxConcurrentFrames * 2)};
@@ -855,7 +857,8 @@ public:
 
   void updateComputeUBO() {
     if (!paused) {
-      compute.uniformData.deltaT = fmin(frameTimer, 0.005) * 0.8;
+      const float maxDt = 0.03f; // cap timestep for stability on mobile
+      compute.uniformData.deltaT = fmin(frameTimer, maxDt) * config.timeScale;
     } else {
       compute.uniformData.deltaT = 0.0f;
     }
@@ -993,7 +996,7 @@ public:
     // Iterate over all parallel sets and solve constraints
     const uint32_t numParallelSets =
         static_cast<uint32_t>(compute.elemParallelSlots.size()) - 1;
-    const uint32_t constraintIterations = 10;
+    const uint32_t constraintIterations = config.numSolverIterations;
 
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                       compute.pipelines.solve);
@@ -1022,7 +1025,6 @@ public:
           addComputeToComputeBarriers(cmdBuffer);
         }
       }
-
       // Barrier between constraint iterations
       if (iter < constraintIterations - 1) {
         addComputeToComputeBarriers(cmdBuffer);
