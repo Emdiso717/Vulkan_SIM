@@ -77,6 +77,8 @@ void main() {
           normalize(sphereDist) * (params.sphereRadius + 0.01);
       // Cancel out velocity
       particleOut[index].vel = vec4(0.0);
+      particleIn[index].pos.xyz = particleOut[index].pos.xyz;
+      particleIn[index].vel = vec4(0.0);
     }
   }
 
