@@ -67,9 +67,9 @@ void main() {
         t * float(1 - fixedPoints[index]) *
         (particleIn[index].pos.xyz - particleIn[index].vel.xyz) /
         (params.deltaT);
-    if (particleIn[index].pos.y <= -3.0 && particleIn[index].vel.y < 0.0) {
+    if (particleIn[index].pos.y <= -1.0 && particleIn[index].vel.y < 0.0) {
       particleIn[index].vel.y = -particleIn[index].vel.y;
-      particleIn[index].pos.y = -3.0;
+      particleIn[index].pos.y = -1.0;
     }
     particleOut[index].pos = particleIn[index].pos;
     particleOut[index].vel = particleIn[index].vel;

@@ -1,22 +1,22 @@
-#include <algorithm>
-#include <cmath>
-#ifdef _WIN32
-#pragma comment(linker, "/subsystem:console")
-#endif
+
 #include "VulkanglTFModel.h"
+#include "glm/fwd.hpp"
+#include "glm/gtc/type_ptr.hpp"
 #include "vulkanexamplebase.h"
 #include <cstdint>
+#include <cstdio>
+#include <readMesh3d.hpp>
 
 class VulkanExample : public VulkanExampleBase {
 public:
   uint32_t indexCount{0};
-  bool simulateWind{false};
   bool dedicatedComputeQueue{false};
-  float TotalFrameTime = 0.0f;
-  float DeltaTime = 1.0 / 120.0f;
 
-  vks::Texture2D textureCloth;
-  vkglTF::Model modelSphere;
+  const struct Configuration {
+    std::string modelPath = "models/bunny.vtk";
+    uint32_t numSolverIterations{8};
+    float timeScale{0.8f}; // deltaT = fmin(frameTimer, 0.05) * timeScale
+  } config;
 
   struct Particle {
     glm::vec4 pos;
@@ -27,14 +27,11 @@ public:
 
   struct ElementInfo {
     int elemId;
-    alignas(8) glm::vec<2, int> pid;
-    float restLength{0.0f};
+    float restVol;
+    alignas(16) glm::ivec4 pid;
+    alignas(16) glm::mat3x4 restShape;
+    alignas(16) glm::mat3x4 restShapeInv;
   };
-
-  struct Cloth {
-    glm::uvec2 gridsize{65, 65};
-    glm::vec2 size{2.0f, 2.0f};
-  } cloth;
 
   struct StorageBuffers {
     vks::Buffer input;
@@ -50,8 +47,7 @@ public:
     std::array<VkDescriptorSet, maxConcurrentFrames> descriptorSets{};
     VkPipelineLayout pipelineLayout{VK_NULL_HANDLE};
     struct Pipelines {
-      VkPipeline cloth{VK_NULL_HANDLE};
-      VkPipeline sphere{VK_NULL_HANDLE};
+      VkPipeline beam3d{VK_NULL_HANDLE};
     } pipelines;
     vks::Buffer indices;
     struct UniformData {
@@ -83,32 +79,38 @@ public:
     } pipelines;
     struct UniformData {
       float deltaT{0.0f};
-      float particleMass{0.19f};
-      float springStiffness{5e4};
-      float damping{0.25f};
-      float restDistH{0};
-      float restDistV{0};
-      float restDistD{0};
-      float sphereRadius{1.0f};
-      glm::vec4 spherePos{0.0f, 0.0f, 0.0f, 0.0f};
-      glm::vec4 gravity{0.0f, 9.8f, 0.0f, 0.0f};
+      float density{1000.0f};
+      alignas(16) glm::vec4 gravity{0.0f, -9.8f, 0.0f, 0.0f};
+      glm::vec4 lame{16442953.0f, 335570.4f, 0.0f, 0.0f};
       glm::ivec2 particleCount{0};
     } uniformData;
+    std::vector<float> masses{};
     std::vector<ElementInfo> elementInfo;
-    std::vector<float> lambdaData;
+    std::vector<float> lambdaHData;
+    std::vector<float> lambdaDData;
     std::vector<int> elemParallelSlots;
     vks::Buffer uniformBuffer;
-    vks::Buffer lambdaBuffer;
+    vks::Buffer lambdaHBuffer;
+    vks::Buffer lambdaDBuffer;
     vks::Buffer elementInfoBuffer;
     vks::Buffer elemParallelSlotsBuffer;
+    vks::Buffer massesBuffer;
+    std::vector<int> fixedpoint;
+    vks::Buffer fixedpointBuffer;
   } compute;
 
+  struct Mesh {
+    Eigen::MatrixXd V;
+    Eigen::MatrixXi tets;
+    Eigen::MatrixXi tris;
+  } beam3d;
+
   VulkanExample() : VulkanExampleBase() {
-    title = "Compute shader cloth simulation";
+    title = "Compute shader deformable simulation";
     camera.type = Camera::CameraType::lookat;
     camera.setPerspective(60.0f, (float)width / (float)height, 0.1f, 512.0f);
     camera.setRotation(glm::vec3(-30.0f, -45.0f, 0.0f));
-    camera.setTranslation(glm::vec3(0.0f, 0.0f, -5.0f));
+    camera.setTranslation(glm::vec3(0.0f, -0.0f, -8.0f));
   }
 
   ~VulkanExample() {
@@ -118,12 +120,10 @@ public:
       for (auto &buffer : graphics.uniformBuffers) {
         buffer.destroy();
       }
-      vkDestroyPipeline(device, graphics.pipelines.cloth, nullptr);
-      vkDestroyPipeline(device, graphics.pipelines.sphere, nullptr);
+      vkDestroyPipeline(device, graphics.pipelines.beam3d, nullptr);
       vkDestroyPipelineLayout(device, graphics.pipelineLayout, nullptr);
       vkDestroyDescriptorSetLayout(device, graphics.descriptorSetLayout,
                                    nullptr);
-      textureCloth.destroy();
 
       // Compute
       compute.uniformBuffer.destroy();
@@ -154,17 +154,6 @@ public:
       enabledFeatures.samplerAnisotropy = VK_TRUE;
     }
   };
-
-  void loadAssets() {
-    const uint32_t glTFLoadingFlags =
-        vkglTF::FileLoadingFlags::PreTransformVertices |
-        vkglTF::FileLoadingFlags::PreMultiplyVertexColors |
-        vkglTF::FileLoadingFlags::FlipY;
-    modelSphere.loadFromFile(getAssetPath() + "models/sphere.gltf",
-                             vulkanDevice, queue, glTFLoadingFlags);
-    textureCloth.loadFromFile(getAssetPath() + "textures/vulkan_cloth_rgba.ktx",
-                              VK_FORMAT_R8G8B8A8_UNORM, vulkanDevice, queue);
-  }
 
   void addGraphicsToComputeBarriers(VkCommandBuffer commandBuffer,
                                     VkAccessFlags srcAccessMask,
@@ -245,35 +234,32 @@ public:
   // These buffers are used as shader storage buffers in the compute shader (to
   // update them) and as vertex input in the vertex shader (to display them)
   void prepareStorageBuffers() {
-    std::vector<Particle> particleBuffer(cloth.gridsize.x * cloth.gridsize.y);
+    uint32_t numParticles = static_cast<uint32_t>(beam3d.V.rows());
 
-    float dx = cloth.size.x / (cloth.gridsize.x - 1);
-    float dy = cloth.size.y / (cloth.gridsize.y - 1);
-    float du = 1.0f / (cloth.gridsize.x - 1);
-    float dv = 1.0f / (cloth.gridsize.y - 1);
-
-    // Set up a slightly tilted cloth that falls onto sphere
-    glm::mat4 transM =
-        glm::translate(glm::mat4(1.0f), glm::vec3(-cloth.size.x / 2.0f, -2.0f,
-                                                  -cloth.size.y / 2.0f));
-    // Small initial tilt to break perfect symmetry
-    transM =
-        glm::rotate(transM, glm::radians(30.0f), glm::vec3(0.0f, 0.0f, 1.0f));
-    for (uint32_t i = 0; i < cloth.gridsize.y; i++) {
-      for (uint32_t j = 0; j < cloth.gridsize.x; j++) {
-        particleBuffer[i + j * cloth.gridsize.y].pos =
-            transM * glm::vec4(dx * j, 0.0f, dy * i, 1.0f);
-        particleBuffer[i + j * cloth.gridsize.y].vel = glm::vec4(0.0f);
-        particleBuffer[i + j * cloth.gridsize.y].uv =
-            glm::vec4(1.0f - du * i, dv * j, 0.0f, 0.0f);
-      }
+    std::vector<Particle> particleBuffer(numParticles);
+    for (uint32_t i = 0; i < numParticles; i++) {
+      particleBuffer[i].pos =
+          glm::vec4(beam3d.V(i, 0), beam3d.V(i, 1), beam3d.V(i, 2), 1.0f);
+      particleBuffer[i].vel = glm::vec4(0.0f);
+      particleBuffer[i].uv = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+      particleBuffer[i].normal = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    for (int i = 0; i < beam3d.tris.rows(); i++) {
+      int a = beam3d.tris(i, 0);
+      int b = beam3d.tris(i, 1);
+      int c = beam3d.tris(i, 2);
+      glm::vec3 normal = glm::cross(
+          glm::vec3(particleBuffer[b].pos) - glm::vec3(particleBuffer[a].pos),
+          glm::vec3(particleBuffer[c].pos) - glm::vec3(particleBuffer[a].pos));
+      particleBuffer[a].normal += glm::vec4(normal, 0.0f);
+      particleBuffer[b].normal += glm::vec4(normal, 0.0f);
+      particleBuffer[c].normal += glm::vec4(normal, 0.0f);
+    }
+    for (int i = 0; i < numParticles; i++) {
+      particleBuffer[i].normal = glm::normalize(particleBuffer[i].normal);
     }
 
     VkDeviceSize storageBufferSize = particleBuffer.size() * sizeof(Particle);
-
-    // Staging
-    // SSBO won't be changed on the host after upload so copy to device local
-    // memory
 
     vks::Buffer stagingBuffer;
 
@@ -283,8 +269,6 @@ public:
                                &stagingBuffer, storageBufferSize,
                                particleBuffer.data());
 
-    // SSBOs will be used both as storage buffers (compute) and vertex buffers
-    // (graphics)
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -297,7 +281,6 @@ public:
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                                &storageBuffers.output, storageBufferSize);
 
-    // Copy from staging buffer
     VkCommandBuffer copyCmd = vulkanDevice->createCommandBuffer(
         VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
     VkBufferCopy copyRegion = {};
@@ -306,10 +289,6 @@ public:
                     1, &copyRegion);
     vkCmdCopyBuffer(copyCmd, stagingBuffer.buffer, storageBuffers.input.buffer,
                     1, &copyRegion);
-    // Add an initial release barrier to the graphics queue,
-    // so that when the compute command buffer executes for the first time
-    // it doesn't complain about a lack of a corresponding "release" to its
-    // "acquire"
     addGraphicsToComputeBarriers(copyCmd, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                                  0,
                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
@@ -318,31 +297,30 @@ public:
 
     stagingBuffer.destroy();
 
-    // Indices
-    std::vector<uint32_t> indices;
-    for (uint32_t y = 0; y < cloth.gridsize.y - 1; y++) {
-      for (uint32_t x = 0; x < cloth.gridsize.x; x++) {
-        indices.push_back((y + 1) * cloth.gridsize.x + x);
-        indices.push_back((y)*cloth.gridsize.x + x);
-      }
-      // Primitive restart (signaled by special value 0xFFFFFFFF)
-      indices.push_back(0xFFFFFFFF);
-    }
+    // Index buffer from model indices (triangle list)
+    uint32_t numSurfacePoints =
+        static_cast<uint32_t>(beam3d.tris.rows() * beam3d.tris.cols());
+
     uint32_t indexBufferSize =
-        static_cast<uint32_t>(indices.size()) * sizeof(uint32_t);
-    indexCount = static_cast<uint32_t>(indices.size());
+        static_cast<uint32_t>(numSurfacePoints) * sizeof(uint32_t);
+    indexCount = static_cast<uint32_t>(numSurfacePoints);
+
+    std::vector<uint32_t> indexPointBuffer(numSurfacePoints);
+    for (uint32_t i = 0; i < numSurfacePoints; i++) {
+      indexPointBuffer[i] = beam3d.tris(i / 3, i % 3);
+    }
 
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                               &stagingBuffer, indexBufferSize, indices.data());
+                               &stagingBuffer, indexBufferSize,
+                               indexPointBuffer.data());
 
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                                &graphics.indices, indexBufferSize);
 
-    // Copy from staging buffer
     copyCmd = vulkanDevice->createCommandBuffer(VK_COMMAND_BUFFER_LEVEL_PRIMARY,
                                                 true);
     copyRegion = {};
@@ -353,7 +331,8 @@ public:
 
     stagingBuffer.destroy();
     uint32_t numElements = static_cast<uint32_t>(compute.elementInfo.size());
-    compute.lambdaData.resize(numElements, 0.0f);
+    compute.lambdaDData.resize(numElements, 0.0f);
+    compute.lambdaHData.resize(numElements, 0.0f);
     // ElementInfo buffer
     VkDeviceSize elementInfoBufferSize = numElements * sizeof(ElementInfo);
     vks::Buffer stagingElementInfoBuffer;
@@ -366,18 +345,52 @@ public:
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &compute.elementInfoBuffer,
         elementInfoBufferSize);
-    // Lambda buffer
-    VkDeviceSize lambdaBufferSize = numElements * sizeof(float);
+    // LambdaD buffer
+    const VkDeviceSize lambdaBufferSize = numElements * sizeof(float);
     vks::Buffer stagingLambdaBuffer;
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                &stagingLambdaBuffer, lambdaBufferSize,
-                               compute.lambdaData.data());
+                               compute.lambdaDData.data());
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                               &compute.lambdaBuffer, lambdaBufferSize);
+                               &compute.lambdaDBuffer, lambdaBufferSize);
+    // LambdaH buffer
+    vks::Buffer stagingLambdaHBuffer;
+    vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &stagingLambdaHBuffer, lambdaBufferSize,
+                               compute.lambdaHData.data());
+    vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                               &compute.lambdaHBuffer, lambdaBufferSize);
+    // mass buffer
+    vks::Buffer stagingMassesBuffer;
+    VkDeviceSize massesBufferSize = compute.masses.size() * sizeof(float);
+    vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &stagingMassesBuffer, massesBufferSize,
+                               compute.masses.data());
+    vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                               &compute.massesBuffer, massesBufferSize);
+    vks::Buffer stagingfixedpointBuffer;
+    VkDeviceSize fixedpointBufferSize = compute.fixedpoint.size() * sizeof(int);
+    vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &stagingfixedpointBuffer, fixedpointBufferSize,
+                               compute.fixedpoint.data());
+    vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                               &compute.fixedpointBuffer, fixedpointBufferSize);
 
     //  ElemParallelSlots buffer
     uint32_t numSlots = static_cast<uint32_t>(compute.elemParallelSlots.size());
@@ -401,7 +414,15 @@ public:
                     compute.elementInfoBuffer.buffer, 1, &copyRegion);
     copyRegion.size = lambdaBufferSize;
     vkCmdCopyBuffer(copyCmd, stagingLambdaBuffer.buffer,
-                    compute.lambdaBuffer.buffer, 1, &copyRegion);
+                    compute.lambdaDBuffer.buffer, 1, &copyRegion);
+    vkCmdCopyBuffer(copyCmd, stagingLambdaHBuffer.buffer,
+                    compute.lambdaHBuffer.buffer, 1, &copyRegion);
+    copyRegion.size = massesBufferSize;
+    vkCmdCopyBuffer(copyCmd, stagingMassesBuffer.buffer,
+                    compute.massesBuffer.buffer, 1, &copyRegion);
+    copyRegion.size = fixedpointBufferSize;
+    vkCmdCopyBuffer(copyCmd, stagingfixedpointBuffer.buffer,
+                    compute.fixedpointBuffer.buffer, 1, &copyRegion);
     copyRegion.size = elemParallelSlotsBufferSize;
     vkCmdCopyBuffer(copyCmd, stagingElemParallelSlotsBuffer.buffer,
                     compute.elemParallelSlotsBuffer.buffer, 1, &copyRegion);
@@ -410,6 +431,9 @@ public:
     stagingElementInfoBuffer.destroy();
     stagingLambdaBuffer.destroy();
     stagingElemParallelSlotsBuffer.destroy();
+    stagingLambdaHBuffer.destroy();
+    stagingMassesBuffer.destroy();
+    stagingfixedpointBuffer.destroy();
   }
 
   void prepareDescriptorPool() {
@@ -418,7 +442,7 @@ public:
         vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                               maxConcurrentFrames * 3),
         vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                              maxConcurrentFrames * 7),
+                                              maxConcurrentFrames * 12),
         vks::initializers::descriptorPoolSize(
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             maxConcurrentFrames * 2)};
@@ -463,11 +487,7 @@ public:
       std::vector<VkWriteDescriptorSet> writeDescriptorSets = {
           vks::initializers::writeDescriptorSet(
               graphics.descriptorSets[i], VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 0,
-              &graphics.uniformBuffers[i].descriptor),
-          vks::initializers::writeDescriptorSet(
-              graphics.descriptorSets[i],
-              VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
-              &textureCloth.descriptor)};
+              &graphics.uniformBuffers[i].descriptor)};
       vkUpdateDescriptorSets(device,
                              static_cast<uint32_t>(writeDescriptorSets.size()),
                              writeDescriptorSets.data(), 0, nullptr);
@@ -483,7 +503,7 @@ public:
     // Pipeline
     VkPipelineInputAssemblyStateCreateInfo inputAssemblyState =
         vks::initializers::pipelineInputAssemblyStateCreateInfo(
-            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP, 0, VK_TRUE);
+            VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST, 0, VK_FALSE);
     VkPipelineRasterizationStateCreateInfo rasterizationState =
         vks::initializers::pipelineRasterizationStateCreateInfo(
             VK_POLYGON_MODE_FILL, VK_CULL_MODE_NONE,
@@ -508,9 +528,9 @@ public:
 
     // Rendering pipeline
     std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages = {
-        loadShader(getShadersPath() + "ridcloth/cloth.vert.spv",
+        loadShader(getShadersPath() + "xpbddfmb3d/beam3d.vert.spv",
                    VK_SHADER_STAGE_VERTEX_BIT),
-        loadShader(getShadersPath() + "ridcloth/cloth.frag.spv",
+        loadShader(getShadersPath() + "xpbddfmb3d/beam3d.frag.spv",
                    VK_SHADER_STAGE_FRAGMENT_BIT)};
 
     VkGraphicsPipelineCreateInfo pipelineCreateInfo =
@@ -553,131 +573,122 @@ public:
     pipelineCreateInfo.renderPass = renderPass;
     VK_CHECK_RESULT(vkCreateGraphicsPipelines(device, pipelineCache, 1,
                                               &pipelineCreateInfo, nullptr,
-                                              &graphics.pipelines.cloth));
-
-    // Sphere rendering pipeline
-    pipelineCreateInfo.pVertexInputState =
-        vkglTF::Vertex::getPipelineVertexInputState(
-            {vkglTF::VertexComponent::Position, vkglTF::VertexComponent::UV,
-             vkglTF::VertexComponent::Normal});
-    inputState.vertexAttributeDescriptionCount =
-        static_cast<uint32_t>(inputAttributes.size());
-    inputAssemblyState.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    inputAssemblyState.primitiveRestartEnable = VK_FALSE;
-    rasterizationState.polygonMode = VK_POLYGON_MODE_FILL;
-    shaderStages = {loadShader(getShadersPath() + "ridcloth/sphere.vert.spv",
-                               VK_SHADER_STAGE_VERTEX_BIT),
-                    loadShader(getShadersPath() + "ridcloth/sphere.frag.spv",
-                               VK_SHADER_STAGE_FRAGMENT_BIT)};
-    VK_CHECK_RESULT(vkCreateGraphicsPipelines(device, pipelineCache, 1,
-                                              &pipelineCreateInfo, nullptr,
-                                              &graphics.pipelines.sphere));
+                                              &graphics.pipelines.beam3d));
   }
 
-  void prepareComputeParallel() {
-    // Set some initial values
-    float dx = cloth.size.x / (cloth.gridsize.x - 1);
-    float dy = cloth.size.y / (cloth.gridsize.y - 1);
+  void Boundarycondition() {
+    uint32_t numParticles = static_cast<uint32_t>(beam3d.V.rows());
+    compute.fixedpoint.resize(numParticles, 0);
+  }
 
-    compute.uniformData.restDistH = dx;
-    compute.uniformData.restDistV = dy;
-    compute.uniformData.restDistD = sqrtf(dx * dx + dy * dy);
-    compute.uniformData.particleCount = cloth.gridsize;
-    int elemId = 0;
-    for (uint32_t y = 0; y < cloth.gridsize.y; y++) {
-      for (uint32_t x = 0; x < cloth.gridsize.x; x++) {
-        int currentIdx = y + x * cloth.gridsize.y;
-        if (x < cloth.gridsize.x - 1) {
-          int rightIdx = y + (x + 1) * cloth.gridsize.y;
-          ElementInfo elem;
-          elem.elemId = elemId++;
-          elem.pid = glm::ivec2(currentIdx, rightIdx);
-          elem.restLength = compute.uniformData.restDistH;
-          compute.elementInfo.push_back(elem);
-        }
-        if (y < cloth.gridsize.y - 1) {
-          int bottomIdx = (y + 1) + x * cloth.gridsize.y;
-          ElementInfo elem;
-          elem.elemId = elemId++;
-          elem.pid = glm::ivec2(currentIdx, bottomIdx);
-          elem.restLength = compute.uniformData.restDistV;
-          compute.elementInfo.push_back(elem);
-        }
-        if (x < cloth.gridsize.x - 1 && y < cloth.gridsize.y - 1) {
-          int bottomRightIdx = (y + 1) + (x + 1) * cloth.gridsize.y;
-          ElementInfo elem;
-          elem.elemId = elemId++;
-          elem.pid = glm::ivec2(currentIdx, bottomRightIdx);
-          elem.restLength = compute.uniformData.restDistD;
-          compute.elementInfo.push_back(elem);
-        }
-        if (x > 0 && y > 0) {
-          int topLeftIdx = (y - 1) + (x - 1) * cloth.gridsize.y;
-          ElementInfo elem;
-          elem.elemId = elemId++;
-          elem.pid = glm::ivec2(currentIdx, topLeftIdx);
-          elem.restLength = compute.uniformData.restDistD;
-          compute.elementInfo.push_back(elem);
-        }
-      }
+  void buildElementInfoFromMesh() {
+#if (_android_)
+    io::readMesh3d(config.modelPath, beam3d.V, beam3d.tets);
+#else
+    io::readMesh3d(getAssetPath() + config.modelPath, beam3d.V, beam3d.tets);
+#endif
+    io::internal::extractBoundary(beam3d.V, beam3d.tets, beam3d.tris);
+    compute.elementInfo.clear();
+    for (size_t i = 0; i < beam3d.tets.rows(); i++) {
+      ElementInfo elem{};
+      elem.elemId = static_cast<int>(compute.elementInfo.size());
+      elem.pid = glm::ivec4(beam3d.tets(i, 0), beam3d.tets(i, 1),
+                            beam3d.tets(i, 2), beam3d.tets(i, 3));
+      glm::vec3 p0(beam3d.V(beam3d.tets(i, 0), 0),
+                   beam3d.V(beam3d.tets(i, 0), 1),
+                   beam3d.V(beam3d.tets(i, 0), 2));
+      glm::vec3 p1(beam3d.V(beam3d.tets(i, 1), 0),
+                   beam3d.V(beam3d.tets(i, 1), 1),
+                   beam3d.V(beam3d.tets(i, 1), 2));
+      glm::vec3 p2(beam3d.V(beam3d.tets(i, 2), 0),
+                   beam3d.V(beam3d.tets(i, 2), 1),
+                   beam3d.V(beam3d.tets(i, 2), 2));
+      glm::vec3 p3(beam3d.V(beam3d.tets(i, 3), 0),
+                   beam3d.V(beam3d.tets(i, 3), 1),
+                   beam3d.V(beam3d.tets(i, 3), 2));
+      glm::vec3 e1 = p1 - p0;
+      glm::vec3 e2 = p2 - p0;
+      glm::vec3 e3 = p3 - p0;
+      elem.restShape = glm::mat3x4(glm::vec4(e1, 0.0f), glm::vec4(e2, 0.0f),
+                                   glm::vec4(e3, 0.0f));
+      glm::mat3 temp_restShape = glm::mat3(e1, e2, e3);
+      elem.restShapeInv = glm::inverse(temp_restShape);
+      elem.restVol = std::abs(glm::determinant(temp_restShape)) / 6.0f;
+      compute.elementInfo.push_back(elem);
     }
-    auto &elemInfos = compute.elementInfo;
-    auto nElements = [&]() { return elemInfos.size(); };
-    auto nParticles = [&]() { return cloth.gridsize.x * cloth.gridsize.y; };
-
-    std::vector<int> elementIds;
-    elementIds.reserve(elemInfos.size());
-    for (size_t i = 0; i < nElements(); ++i) {
-      elementIds.emplace_back(static_cast<int>(i));
-    }
-
+  }
+  void precompute() {
+    uint32_t nelements = compute.elementInfo.size();
+    uint32_t nparticles = beam3d.V.rows();
+    // Step-1: precompute element parallelable sets
     std::vector<std::vector<int>> elemParaSets;
-    while (!elementIds.empty()) {
-      std::vector<bool> particleOccupied(nParticles(), false);
-      std::vector<int> currentSet;
-      for (auto it = elementIds.begin(); it != elementIds.end();) {
-        const auto &elemInfo = elemInfos[*it];
-        // Check if both particles are not occupied
-        bool canAdd = true;
-        for (int i = 0; i < 2; ++i) {
-          if (particleOccupied[elemInfo.pid[i]]) {
-            canAdd = false;
-            break;
+    {
+      std::vector<int> elementIds;
+      elementIds.reserve(compute.elementInfo.size());
+      for (int i = 0; i < nelements; ++i) {
+        elementIds.emplace_back(i);
+      }
+      while (!elementIds.empty()) {
+        std::vector<bool> particleOccupied(nparticles, false);
+        std::vector<int> currentSet;
+        for (auto it = elementIds.begin(); it != elementIds.end();) {
+          const auto &elemInfo = compute.elementInfo[*it];
+          bool canAdd = true;
+          for (int i = 0; i < 4; ++i) {
+            if (particleOccupied[elemInfo.pid[i]]) {
+              canAdd = false;
+              break;
+            }
+          }
+          if (canAdd) {
+            // add to current set
+            currentSet.emplace_back(*it);
+            for (int i = 0; i <= 3; ++i) {
+              const auto pid = elemInfo.pid[i];
+              particleOccupied[pid] = true;
+            }
+
+            // remove from elementIds
+            it = elementIds.erase(it);
+          } else {
+            ++it;
           }
         }
-        if (canAdd) {
-          // add to current set
-          currentSet.emplace_back(*it);
-          for (int i = 0; i < 2; ++i) {
-            const auto pid = elemInfo.pid[i];
-            particleOccupied[pid] = true;
-          }
-          // remove from elementIds
-          it = elementIds.erase(it);
-        } else {
-          ++it;
+        elemParaSets.emplace_back(std::move(currentSet));
+      }
+      // reorder elemInfos according to parallelable sets
+      std::vector<ElementInfo> reorderedElemInfos;
+      reorderedElemInfos.reserve(nelements);
+      compute.elemParallelSlots.clear();
+      for (const auto &elemIdSet : elemParaSets) {
+        compute.elemParallelSlots.emplace_back(
+            static_cast<int>(reorderedElemInfos.size()));
+        for (const auto elemId : elemIdSet) {
+          reorderedElemInfos.emplace_back(compute.elementInfo[elemId]);
+          // correct elemId
+          reorderedElemInfos.back().elemId =
+              static_cast<int>(reorderedElemInfos.size()) - 1;
         }
       }
-      elemParaSets.emplace_back(std::move(currentSet));
-    }
-    // reorder elemInfos according to parallelable sets
-    std::vector<ElementInfo> reorderedElemInfos;
-    reorderedElemInfos.reserve(nElements());
-    compute.elemParallelSlots.clear();
-    for (const auto &elemIdSet : elemParaSets) {
       compute.elemParallelSlots.emplace_back(
           static_cast<int>(reorderedElemInfos.size()));
-      for (const auto elemId : elemIdSet) {
-        reorderedElemInfos.emplace_back(elemInfos[elemId]);
-        // correct elemId
-        reorderedElemInfos.back().elemId =
-            static_cast<int>(reorderedElemInfos.size()) - 1;
+      assert(reorderedElemInfos.size() == nelements);
+      std::swap(compute.elementInfo, reorderedElemInfos);
+    }
+
+    // Step-2: Precompute rest Shape Matrix, rest Volume, mass and inverse
+    {
+      compute.masses.resize(nparticles);
+      std::fill(compute.masses.begin(), compute.masses.end(), float(0.0));
+      for (int i = 0; i < nelements; ++i) {
+        const auto &info = compute.elementInfo[i];
+        const float mass = compute.uniformData.density *
+                           info.restVol; // mass = density * volume
+        for (int j = 0; j <= 3; ++j) {
+          compute.masses[info.pid[j]] += mass / static_cast<float>(4.0);
+        }
       }
     }
-    compute.elemParallelSlots.emplace_back(
-        static_cast<int>(reorderedElemInfos.size()));
-    assert(reorderedElemInfos.size() == nElements());
-    std::swap(elemInfos, reorderedElemInfos);
   }
 
   // Prepare the resources used for the compute part of the sample
@@ -694,15 +705,6 @@ public:
                                sizeof(Compute::UniformData));
     VK_CHECK_RESULT(compute.uniformBuffer.map());
 
-    // Set some initial values
-    float dx = cloth.size.x / (cloth.gridsize.x - 1);
-    float dy = cloth.size.y / (cloth.gridsize.y - 1);
-
-    compute.uniformData.restDistH = dx;
-    compute.uniformData.restDistV = dy;
-    compute.uniformData.restDistD = sqrtf(dx * dx + dy * dy);
-    compute.uniformData.particleCount = cloth.gridsize;
-
     // Create compute pipeline
     std::vector<VkDescriptorSetLayoutBinding> setLayoutBindings = {
         vks::initializers::descriptorSetLayoutBinding(
@@ -717,6 +719,12 @@ public:
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 4),
         vks::initializers::descriptorSetLayoutBinding(
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 5),
+        vks::initializers::descriptorSetLayoutBinding(
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 6),
+        vks::initializers::descriptorSetLayoutBinding(
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 7),
+        vks::initializers::descriptorSetLayoutBinding(
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 8),
     };
 
     VkDescriptorSetLayoutCreateInfo descriptorLayout =
@@ -757,13 +765,22 @@ public:
             &compute.uniformBuffer.descriptor),
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3,
-            &compute.lambdaBuffer.descriptor),
+            &compute.lambdaDBuffer.descriptor),
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4,
             &compute.elementInfoBuffer.descriptor),
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5,
-            &compute.elemParallelSlotsBuffer.descriptor)};
+            &compute.elemParallelSlotsBuffer.descriptor),
+        vks::initializers::writeDescriptorSet(
+            compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6,
+            &compute.massesBuffer.descriptor),
+        vks::initializers::writeDescriptorSet(
+            compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7,
+            &compute.lambdaHBuffer.descriptor),
+        vks::initializers::writeDescriptorSet(
+            compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8,
+            &compute.fixedpointBuffer.descriptor)};
 
     vkUpdateDescriptorSets(
         device, static_cast<uint32_t>(computeWriteDescriptorSets.size()),
@@ -774,21 +791,21 @@ public:
         vks::initializers::computePipelineCreateInfo(compute.pipelineLayout, 0);
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "ridcloth/cloth_begin.comp.spv",
+        loadShader(getShadersPath() + "xpbddfmb3d/cloth_begin.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(
         device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
         &compute.pipelines.begin));
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "ridcloth/cloth_solve.comp.spv",
+        loadShader(getShadersPath() + "xpbddfmb3d/cloth_solve.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(
         device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
         &compute.pipelines.solve));
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "ridcloth/cloth_end.comp.spv",
+        loadShader(getShadersPath() + "xpbddfmb3d/cloth_end.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1,
                                              &computePipelineCreateInfo,
@@ -838,20 +855,8 @@ public:
 
   void updateComputeUBO() {
     if (!paused) {
-      compute.uniformData.deltaT = DeltaTime;
-      // fmin(frameTimer, 0.02) * 0.8;
-      if (simulateWind) {
-        std::default_random_engine rndEngine(
-            benchmark.active ? 0 : (unsigned)time(nullptr));
-        std::uniform_real_distribution<float> rd(1.0f, 12.0f);
-        compute.uniformData.gravity.x = cos(glm::radians(-timer * 360.0f)) *
-                                        (rd(rndEngine) - rd(rndEngine));
-        compute.uniformData.gravity.z =
-            sin(glm::radians(timer * 360.0f)) * (rd(rndEngine) - rd(rndEngine));
-      } else {
-        compute.uniformData.gravity.x = 0.0f;
-        compute.uniformData.gravity.z = 0.0f;
-      }
+      compute.uniformData.deltaT = 1.0 / 120.0;
+      // fmin(frameTimer, 0.05) * config.timeScale;
     } else {
       compute.uniformData.deltaT = 0.0f;
     }
@@ -861,7 +866,10 @@ public:
 
   void updateGraphicsUBO() {
     graphics.uniformData.projection = camera.matrices.perspective;
-    graphics.uniformData.view = camera.matrices.view;
+    const glm::mat4 flipY =
+        glm::scale(glm::mat4(1.0f), glm::vec3(1.0f, -1.0f, 1.0f));
+    // Flip model Y axis (model = flipY, modelview = view * model)
+    graphics.uniformData.view = camera.matrices.view * flipY;
     memcpy(graphics.uniformBuffers[currentBuffer].mapped, &graphics.uniformData,
            sizeof(Graphics::UniformData));
   }
@@ -871,8 +879,9 @@ public:
     // queue family
     dedicatedComputeQueue = vulkanDevice->queueFamilyIndices.graphics !=
                             vulkanDevice->queueFamilyIndices.compute;
-    loadAssets();
-    prepareComputeParallel();
+    buildElementInfoFromMesh();
+    precompute();
+    Boundarycondition();
     prepareStorageBuffers();
     prepareDescriptorPool();
     prepareGraphics();
@@ -922,17 +931,9 @@ public:
 
     VkDeviceSize offsets[1] = {0};
 
-    // // Render sphere
-    // vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-    //                   graphics.pipelines.sphere);
-    // vkCmdBindDescriptorSets(
-    //     cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics.pipelineLayout,
-    //     0, 1, &graphics.descriptorSets[currentBuffer], 0, nullptr);
-    // modelSphere.draw(cmdBuffer);
-
     // Render cloth
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      graphics.pipelines.cloth);
+                      graphics.pipelines.beam3d);
     vkCmdBindDescriptorSets(
         cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics.pipelineLayout, 0,
         1, &graphics.descriptorSets[currentBuffer], 0, nullptr);
@@ -955,7 +956,7 @@ public:
     VK_CHECK_RESULT(vkEndCommandBuffer(cmdBuffer));
   }
 
-  void buildComputeCommandBuffer(uint32_t substeps) {
+  void buildComputeCommandBuffer() {
     VkCommandBuffer cmdBuffer = compute.commandBuffers[currentBuffer];
 
     VkCommandBufferBeginInfo cmdBufInfo =
@@ -968,91 +969,77 @@ public:
                                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-    // If we don't need to advance simulation this frame, we still need to
-    // transfer ownership back to graphics (graphics command buffer will
-    // acquire).
-    if (substeps == 0) {
-      addComputeToGraphicsBarriers(cmdBuffer, 0, 0,
-                                   VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                   VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-      vkEndCommandBuffer(cmdBuffer);
-      return;
-    }
-
     // Single descriptor set, fixed binding of input/output buffers
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                             compute.pipelineLayout, 0, 1,
                             &compute.descriptorSets[0], 0, 0);
 
-    const uint32_t numParticles = cloth.gridsize.x * cloth.gridsize.y;
-    const uint32_t numLambda = static_cast<uint32_t>(compute.lambdaData.size());
-    const uint32_t workgroupSizeX = 64;
-    const uint32_t numWorkgroupsX =
+    // Stage 0: Begin solve
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      compute.pipelines.begin);
+
+    // Dispatch for all particles
+    uint32_t numParticles = static_cast<uint32_t>(beam3d.V.rows());
+    uint32_t numLambda = compute.lambdaDData.size();
+    uint32_t workgroupSizeX = 64;
+    uint32_t numWorkgroupsX =
         (std::max(numParticles, numLambda) + workgroupSizeX - 1) /
         workgroupSizeX;
+    vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
 
+    // Barrier after begin solve
+    addComputeToComputeBarriers(cmdBuffer);
+
+    // Stage 1: Constraint solving
+    // Iterate over all parallel sets and solve constraints
     const uint32_t numParallelSets =
         static_cast<uint32_t>(compute.elemParallelSlots.size()) - 1;
-    const uint32_t constraintIterations = 10;
+    const uint32_t constraintIterations = config.numSolverIterations;
 
-    const uint32_t workgroupSizeXSet = 64;
-    const uint32_t numParticlesStage2 = numParticles;
-    const uint32_t workgroupSizeXStage2 = 64;
-    const uint32_t numWorkgroupsXStage2 =
-        (numParticlesStage2 + workgroupSizeXStage2 - 1) / workgroupSizeXStage2;
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      compute.pipelines.solve);
 
     PushConstants pushConsts{};
-    for (uint32_t step = 0; step < substeps; step++) {
-      // Stage 0: Begin solve
-      vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                        compute.pipelines.begin);
-      vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
+    for (uint32_t iter = 0; iter < constraintIterations; iter++) {
+      // Iterate over all parallel sets
+      for (uint32_t setIdx = 0; setIdx < numParallelSets; setIdx++) {
+        pushConsts.parallelSetStartIndex = setIdx;
+        vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                           sizeof(PushConstants), &pushConsts);
 
-      // Barrier after begin solve
-      addComputeToComputeBarriers(cmdBuffer);
+        // Dispatch for this parallel set
+        uint32_t setStart = compute.elemParallelSlots[setIdx];
+        uint32_t setEnd = compute.elemParallelSlots[setIdx + 1];
+        uint32_t setSize = setEnd - setStart;
 
-      // Stage 1: Constraint solving
-      vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                        compute.pipelines.solve);
+        uint32_t workgroupSizeXSet = 64;
+        uint32_t numWorkgroupsXSet =
+            (setSize + workgroupSizeXSet - 1) / workgroupSizeXSet;
+        vkCmdDispatch(cmdBuffer, numWorkgroupsXSet, 1, 1);
 
-      for (uint32_t iter = 0; iter < constraintIterations; iter++) {
-        // Iterate over all parallel sets
-        for (uint32_t setIdx = 0; setIdx < numParallelSets; setIdx++) {
-          pushConsts.parallelSetStartIndex = setIdx;
-          vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
-                             VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                             sizeof(PushConstants), &pushConsts);
-
-          const uint32_t setStart = compute.elemParallelSlots[setIdx];
-          const uint32_t setEnd = compute.elemParallelSlots[setIdx + 1];
-          const uint32_t setSize = setEnd - setStart;
-
-          const uint32_t numWorkgroupsXSet =
-              (setSize + workgroupSizeXSet - 1) / workgroupSizeXSet;
-          vkCmdDispatch(cmdBuffer, numWorkgroupsXSet, 1, 1);
-
-          // Barrier between parallel sets within same iteration
-          if (setIdx < numParallelSets - 1) {
-            addComputeToComputeBarriers(cmdBuffer);
-          }
-        }
-
-        // Barrier between constraint iterations
-        if (iter < constraintIterations - 1) {
+        // Barrier between parallel sets within same iteration
+        if (setIdx < numParallelSets - 1) {
           addComputeToComputeBarriers(cmdBuffer);
         }
       }
-
-      // Stage 2: End solve
-      vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                        compute.pipelines.end);
-      vkCmdDispatch(cmdBuffer, numWorkgroupsXStage2, 1, 1);
-
-      // Barrier between substeps (except after the last one)
-      if (step + 1 < substeps) {
+      // Barrier between constraint iterations
+      if (iter < constraintIterations - 1) {
         addComputeToComputeBarriers(cmdBuffer);
       }
     }
+
+    // Stage 2: End solve
+    // Update velocities based on position changes and write to particleOut
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      compute.pipelines.end);
+
+    // Dispatch for all particles
+    uint32_t numParticlesStage2 = static_cast<uint32_t>(beam3d.V.rows());
+    uint32_t workgroupSizeXStage2 = 64;
+    uint32_t numWorkgroupsXStage2 =
+        (numParticlesStage2 + workgroupSizeXStage2 - 1) / workgroupSizeXStage2;
+    vkCmdDispatch(cmdBuffer, numWorkgroupsXStage2, 1, 1);
 
     // Release the storage buffers back to the graphics queue
     addComputeToGraphicsBarriers(cmdBuffer, VK_ACCESS_SHADER_WRITE_BIT, 0,
@@ -1065,28 +1052,18 @@ public:
   virtual void render() {
     if (!prepared)
       return;
-
     // Submit compute commands
     {
       VK_CHECK_RESULT(vkWaitForFences(device, 1, &compute.fences[currentBuffer],
                                       VK_TRUE, UINT64_MAX));
       VK_CHECK_RESULT(vkResetFences(device, 1, &compute.fences[currentBuffer]));
 
-      TotalFrameTime += frameTimer;
+      float Frame = frameTimer;
       updateComputeUBO();
-      const uint32_t maxSubstepsPerFrame = 16;
-      uint32_t substeps =
-          static_cast<uint32_t>(std::floor(TotalFrameTime / DeltaTime));
-      if (substeps > maxSubstepsPerFrame) {
-        substeps = maxSubstepsPerFrame;
+      while (Frame > 1.0 / 120.0) {
+        buildComputeCommandBuffer();
+        Frame -= 1.0 / 120.0;
       }
-      TotalFrameTime -= static_cast<float>(substeps) * DeltaTime;
-      // Avoid unbounded catch-up if we fall behind
-      if (TotalFrameTime >
-          DeltaTime * static_cast<float>(maxSubstepsPerFrame)) {
-        TotalFrameTime = DeltaTime * static_cast<float>(maxSubstepsPerFrame);
-      }
-      buildComputeCommandBuffer(substeps);
 
       VkPipelineStageFlags waitDstStageMask =
           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
@@ -1103,6 +1080,10 @@ public:
       submitInfo.pCommandBuffers = &compute.commandBuffers[currentBuffer];
       VK_CHECK_RESULT(vkQueueSubmit(compute.queue, 1, &submitInfo,
                                     compute.fences[currentBuffer]));
+
+      // Wait for compute to finish, then read back particle[525] position
+      VK_CHECK_RESULT(vkWaitForFences(device, 1, &compute.fences[currentBuffer],
+                                      VK_TRUE, UINT64_MAX));
     }
 
     // Submit graphics commands
@@ -1138,12 +1119,6 @@ public:
           vkQueueSubmit(queue, 1, &submitInfo, waitFences[currentBuffer]));
 
       VulkanExampleBase::submitFrame(true);
-    }
-  }
-
-  virtual void OnUpdateUIOverlay(vks::UIOverlay *overlay) {
-    if (overlay->header("Settings")) {
-      overlay->checkBox("Simulate wind", &simulateWind);
     }
   }
 };

@@ -11,7 +11,7 @@ layout(std430, binding = 0) buffer ParticleIn { Particle particleIn[]; };
 
 layout(std430, binding = 1) buffer ParticleOut { Particle particleOut[]; };
 
-layout(local_size_x = 10) in;
+layout(local_size_x = 64) in;
 
 layout(binding = 2) uniform UBO {
   float deltaT;
@@ -48,7 +48,7 @@ layout(std430, binding = 5) buffer ElemParallelSlotsBuffer {
 layout(push_constant) uniform PushConsts { uint parallelSetStartIndex; }
 pushConsts;
 
-bool isc(uint pid) { return false; }
+bool isc(uint pid) { return pid == 0 || pid == 64; }
 
 void main() {
   uvec3 id = gl_GlobalInvocationID;
@@ -67,18 +67,18 @@ void main() {
         (params.deltaT);
     particleOut[index].pos = particleIn[index].pos;
     particleOut[index].vel = particleIn[index].vel;
-    // Sphere collision
-    vec3 sphereDist = particleOut[index].pos.xyz - params.spherePos.xyz;
-    if (length(sphereDist) < params.sphereRadius + 0.01) {
-      // If the particle is inside the sphere, push it to the outer radius
-      particleOut[index].pos.xyz =
-          params.spherePos.xyz +
-          normalize(sphereDist) * (params.sphereRadius + 0.01);
-      // Cancel out velocity
-      particleOut[index].vel = vec4(0.0);
-      particleIn[index].pos.xyz = particleOut[index].pos.xyz;
-      particleIn[index].vel = vec4(0.0);
-    }
+    // // Sphere collision
+    // vec3 sphereDist = particleOut[index].pos.xyz - params.spherePos.xyz;
+    // if (length(sphereDist) < params.sphereRadius + 0.01) {
+    //   // If the particle is inside the sphere, push it to the outer radius
+    //   particleOut[index].pos.xyz =
+    //       params.spherePos.xyz +
+    //       normalize(sphereDist) * (params.sphereRadius + 0.01);
+    //   // Cancel out velocity
+    //   particleOut[index].vel = vec4(0.0);
+    //   particleIn[index].pos.xyz = particleOut[index].pos.xyz;
+    //   particleIn[index].vel = vec4(0.0);
+    // }
   }
 
   // Derive logical 2D coordinates from linear index for boundary checks

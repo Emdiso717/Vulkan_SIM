@@ -54,7 +54,6 @@
 #include <unordered_map>
 #include <vector>
 
-
 #define GLM_FORCE_RADIANS
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #define GLM_ENABLE_EXPERIMENTAL
@@ -63,7 +62,6 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <string>
-
 
 #include "vulkan/vulkan.h"
 
@@ -77,11 +75,9 @@
 #include "VulkanUIOverlay.h"
 #include "keycodes.hpp"
 
-
 #include "VulkanInitializers.hpp"
 #include "benchmark.hpp"
 #include "camera.hpp"
-
 
 constexpr uint32_t maxConcurrentFrames{2};
 
@@ -110,6 +106,7 @@ protected:
   // Frame counter to display fps
   uint32_t frameCounter = 0;
   uint32_t lastFPS = 0;
+  float FPStimer = 0.0f;
   std::chrono::time_point<std::chrono::high_resolution_clock> lastTimestamp,
       tPrevEnd;
   // Vulkan instance, stores all per-application states

@@ -3,6 +3,7 @@
 #endif
 #include "VulkanglTFModel.h"
 #include "vulkanexamplebase.h"
+#include <cmath>
 #include <cstdint>
 
 class VulkanExample : public VulkanExampleBase {
@@ -10,6 +11,8 @@ public:
   uint32_t indexCount{0};
   bool simulateWind{false};
   bool dedicatedComputeQueue{false};
+  float TotalFrameTime = 0.0f;
+  float DeltaTime = 1.0 / 120.0f;
 
   vks::Texture2D textureCloth;
   vkglTF::Model modelSphere;
@@ -28,8 +31,8 @@ public:
   };
 
   struct Cloth {
-    glm::uvec2 gridsize{60, 60};
-    glm::vec2 size{5.0f, 5.0f};
+    glm::uvec2 gridsize{65, 65};
+    glm::vec2 size{2.0f, 2.0f};
   } cloth;
 
   struct StorageBuffers {
@@ -79,8 +82,8 @@ public:
     } pipelines;
     struct UniformData {
       float deltaT{0.0f};
-      float particleMass{0.1f};
-      float springStiffness{2000.0f};
+      float particleMass{0.19f};
+      float springStiffness{5e4};
       float damping{0.25f};
       float restDistH{0};
       float restDistV{0};
@@ -248,10 +251,13 @@ public:
     float du = 1.0f / (cloth.gridsize.x - 1);
     float dv = 1.0f / (cloth.gridsize.y - 1);
 
-    // Set up a flat cloth that falls onto sphere
+    // Set up a slightly tilted cloth that falls onto sphere
     glm::mat4 transM =
         glm::translate(glm::mat4(1.0f), glm::vec3(-cloth.size.x / 2.0f, -2.0f,
                                                   -cloth.size.y / 2.0f));
+    // Small initial tilt to break perfect symmetry
+    transM =
+        glm::rotate(transM, glm::radians(30.0f), glm::vec3(0.0f, 0.0f, 1.0f));
     for (uint32_t i = 0; i < cloth.gridsize.y; i++) {
       for (uint32_t j = 0; j < cloth.gridsize.x; j++) {
         particleBuffer[i + j * cloth.gridsize.y].pos =
@@ -831,7 +837,8 @@ public:
 
   void updateComputeUBO() {
     if (!paused) {
-      compute.uniformData.deltaT = fmin(frameTimer, 0.02) * 0.8;
+      compute.uniformData.deltaT = DeltaTime;
+      // fmin(frameTimer, 0.02) * 0.8;
       if (simulateWind) {
         std::default_random_engine rndEngine(
             benchmark.active ? 0 : (unsigned)time(nullptr));
@@ -914,13 +921,13 @@ public:
 
     VkDeviceSize offsets[1] = {0};
 
-    // Render sphere
-    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      graphics.pipelines.sphere);
-    vkCmdBindDescriptorSets(
-        cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics.pipelineLayout, 0,
-        1, &graphics.descriptorSets[currentBuffer], 0, nullptr);
-    modelSphere.draw(cmdBuffer);
+    // // Render sphere
+    // vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+    //                   graphics.pipelines.sphere);
+    // vkCmdBindDescriptorSets(
+    //     cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, graphics.pipelineLayout,
+    //     0, 1, &graphics.descriptorSets[currentBuffer], 0, nullptr);
+    // modelSphere.draw(cmdBuffer);
 
     // Render cloth
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -947,7 +954,7 @@ public:
     VK_CHECK_RESULT(vkEndCommandBuffer(cmdBuffer));
   }
 
-  void buildComputeCommandBuffer() {
+  void buildComputeCommandBuffer(uint32_t substeps) {
     VkCommandBuffer cmdBuffer = compute.commandBuffers[currentBuffer];
 
     VkCommandBufferBeginInfo cmdBufInfo =
@@ -960,78 +967,86 @@ public:
                                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
+    // If we don't need to advance simulation this frame, we still need to
+    // transfer ownership back to graphics (graphics command buffer will
+    // acquire).
+    if (substeps == 0) {
+      addComputeToGraphicsBarriers(cmdBuffer, 0, 0,
+                                   VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                   VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+      vkEndCommandBuffer(cmdBuffer);
+      return;
+    }
+
     // Single descriptor set, fixed binding of input/output buffers
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                             compute.pipelineLayout, 0, 1,
                             &compute.descriptorSets[0], 0, 0);
 
-    // Stage 0: Begin solve
-    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                      compute.pipelines.begin);
-
-    // Dispatch for all particles
-    uint32_t numParticles = cloth.gridsize.x * cloth.gridsize.y;
-    uint32_t numLambda = compute.lambdaData.size();
-    uint32_t workgroupSizeX = 10;
-    uint32_t numWorkgroupsX =
+    const uint32_t numParticles = cloth.gridsize.x * cloth.gridsize.y;
+    const uint32_t numLambda = static_cast<uint32_t>(compute.lambdaData.size());
+    const uint32_t workgroupSizeX = 64;
+    const uint32_t numWorkgroupsX =
         (std::max(numParticles, numLambda) + workgroupSizeX - 1) /
         workgroupSizeX;
-    vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
 
-    // Barrier after begin solve
-    addComputeToComputeBarriers(cmdBuffer);
-
-    // Stage 1: Constraint solving
-    // Iterate over all parallel sets and solve constraints
     const uint32_t numParallelSets =
         static_cast<uint32_t>(compute.elemParallelSlots.size()) - 1;
     const uint32_t constraintIterations = 10;
 
-    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                      compute.pipelines.solve);
+    const uint32_t workgroupSizeXSet = 64;
+    const uint32_t numParticlesStage2 = numParticles;
+    const uint32_t workgroupSizeXStage2 = 64;
+    const uint32_t numWorkgroupsXStage2 =
+        (numParticlesStage2 + workgroupSizeXStage2 - 1) / workgroupSizeXStage2;
 
     PushConstants pushConsts{};
-    for (uint32_t iter = 0; iter < constraintIterations; iter++) {
-      // Iterate over all parallel sets
-      for (uint32_t setIdx = 0; setIdx < numParallelSets; setIdx++) {
-        pushConsts.parallelSetStartIndex = setIdx;
-        vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
-                           VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                           sizeof(PushConstants), &pushConsts);
+    for (uint32_t step = 0; step < substeps; step++) {
+      // Stage 0: Begin solve
+      vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                        compute.pipelines.begin);
+      vkCmdDispatch(cmdBuffer, numWorkgroupsX, 1, 1);
 
-        // Dispatch for this parallel set
-        uint32_t setStart = compute.elemParallelSlots[setIdx];
-        uint32_t setEnd = compute.elemParallelSlots[setIdx + 1];
-        uint32_t setSize = setEnd - setStart;
+      // Barrier after begin solve
+      addComputeToComputeBarriers(cmdBuffer);
 
-        uint32_t workgroupSizeXSet = 10;
-        uint32_t numWorkgroupsXSet =
-            (setSize + workgroupSizeXSet - 1) / workgroupSizeXSet;
-        vkCmdDispatch(cmdBuffer, numWorkgroupsXSet, 1, 1);
+      // Stage 1: Constraint solving
+      vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                        compute.pipelines.solve);
 
-        // Barrier between parallel sets within same iteration
-        if (setIdx < numParallelSets - 1) {
+      for (uint32_t iter = 0; iter < constraintIterations; iter++) {
+        for (uint32_t setIdx = 0; setIdx < numParallelSets; setIdx++) {
+          pushConsts.parallelSetStartIndex = setIdx;
+          vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
+                             VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                             sizeof(PushConstants), &pushConsts);
+
+          const uint32_t setStart = compute.elemParallelSlots[setIdx];
+          const uint32_t setEnd = compute.elemParallelSlots[setIdx + 1];
+          const uint32_t setSize = setEnd - setStart;
+          const uint32_t numWorkgroupsXSet =
+              (setSize + workgroupSizeXSet - 1) / workgroupSizeXSet;
+          vkCmdDispatch(cmdBuffer, numWorkgroupsXSet, 1, 1);
+
+          if (setIdx < numParallelSets - 1) {
+            addComputeToComputeBarriers(cmdBuffer);
+          }
+        }
+        if (iter < constraintIterations - 1) {
           addComputeToComputeBarriers(cmdBuffer);
         }
       }
 
-      // Barrier between constraint iterations
-      if (iter < constraintIterations - 1) {
+      // Stage 2: End solve
+      vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                        compute.pipelines.end);
+      vkCmdDispatch(cmdBuffer, numWorkgroupsXStage2, 1, 1);
+
+      // Barrier between substeps (except after the last one)
+      if (step + 1 < substeps) {
         addComputeToComputeBarriers(cmdBuffer);
       }
     }
-
-    // Stage 2: End solve
-    // Update velocities based on position changes and write to particleOut
-    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                      compute.pipelines.end);
-
-    // Dispatch for all particles
-    uint32_t numParticlesStage2 = cloth.gridsize.x * cloth.gridsize.y;
-    uint32_t workgroupSizeXStage2 = 10;
-    uint32_t numWorkgroupsXStage2 =
-        (numParticlesStage2 + workgroupSizeXStage2 - 1) / workgroupSizeXStage2;
-    vkCmdDispatch(cmdBuffer, numWorkgroupsXStage2, 1, 1);
 
     // Release the storage buffers back to the graphics queue
     addComputeToGraphicsBarriers(cmdBuffer, VK_ACCESS_SHADER_WRITE_BIT, 0,
@@ -1042,6 +1057,7 @@ public:
   }
 
   virtual void render() {
+    TotalFrameTime += frameTimer;
     if (!prepared)
       return;
 
@@ -1052,8 +1068,19 @@ public:
       VK_CHECK_RESULT(vkResetFences(device, 1, &compute.fences[currentBuffer]));
 
       updateComputeUBO();
-      buildComputeCommandBuffer();
-
+      const uint32_t maxSubstepsPerFrame = 16;
+      uint32_t substeps =
+          static_cast<uint32_t>(std::floor(TotalFrameTime / DeltaTime));
+      if (substeps > maxSubstepsPerFrame) {
+        substeps = maxSubstepsPerFrame;
+      }
+      TotalFrameTime -= static_cast<float>(substeps) * DeltaTime;
+      // Avoid unbounded catch-up if we fall behind
+      if (TotalFrameTime >
+          DeltaTime * static_cast<float>(maxSubstepsPerFrame)) {
+        TotalFrameTime = DeltaTime * static_cast<float>(maxSubstepsPerFrame);
+      }
+      buildComputeCommandBuffer(substeps);
       VkPipelineStageFlags waitDstStageMask =
           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
       VkSubmitInfo submitInfo = vks::initializers::submitInfo();
