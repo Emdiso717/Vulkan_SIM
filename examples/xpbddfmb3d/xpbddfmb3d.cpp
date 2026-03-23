@@ -2,6 +2,7 @@
 #include "VulkanglTFModel.h"
 #include "glm/fwd.hpp"
 #include "glm/gtc/type_ptr.hpp"
+#include "vtkio.hpp"
 #include "vulkanexamplebase.h"
 #include <cmath>
 #include <cstdint>
@@ -12,10 +13,11 @@ class VulkanExample : public VulkanExampleBase {
 public:
   uint32_t indexCount{0};
   bool dedicatedComputeQueue{false};
+  uint32_t Framecount{0};
   float TotalFrameTime = 0.0f;
 
   const struct Configuration {
-    std::string modelPath = "models/bunny.vtk";
+    std::string modelPath = "models/tetmesh_frame_0.vtk";
     uint32_t numSolverIterations{10};
     float timeScale{0.8f};
     float deltaT{1.0f / 120.0f};
@@ -40,6 +42,10 @@ public:
     vks::Buffer input;
     vks::Buffer output;
   } storageBuffers;
+
+  // Readback buffer for CPU export (GPU writes ParticleOut -> copy -> mapped)
+  vks::Buffer outputReadback;
+  VkDeviceSize storageBufferSize = 0;
 
   struct PushConstants {
     uint32_t parallelSetStartIndex;
@@ -148,6 +154,8 @@ public:
       // SSBOs
       storageBuffers.input.destroy();
       storageBuffers.output.destroy();
+      outputReadback.unmap();
+      outputReadback.destroy();
     }
   }
 
@@ -262,7 +270,7 @@ public:
       particleBuffer[i].normal = glm::normalize(particleBuffer[i].normal);
     }
 
-    VkDeviceSize storageBufferSize = particleBuffer.size() * sizeof(Particle);
+    storageBufferSize = particleBuffer.size() * sizeof(Particle);
 
     vks::Buffer stagingBuffer;
 
@@ -272,17 +280,17 @@ public:
                                &stagingBuffer, storageBufferSize,
                                particleBuffer.data());
 
-    vulkanDevice->createBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                               &storageBuffers.input, storageBufferSize);
+    vulkanDevice->createBuffer(
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &storageBuffers.input,
+        storageBufferSize);
 
-    vulkanDevice->createBuffer(VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                               &storageBuffers.output, storageBufferSize);
+    vulkanDevice->createBuffer(
+        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &storageBuffers.output,
+        storageBufferSize);
 
     VkCommandBuffer copyCmd = vulkanDevice->createCommandBuffer(
         VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
@@ -299,6 +307,13 @@ public:
     vulkanDevice->flushCommandBuffer(copyCmd, queue, true);
 
     stagingBuffer.destroy();
+
+    // Host-visible staging buffer for reading back ParticleOut
+    vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &outputReadback, storageBufferSize);
+    VK_CHECK_RESULT(outputReadback.map());
 
     // Index buffer from model indices (triangle list)
     uint32_t numSurfacePoints =
@@ -973,7 +988,8 @@ public:
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     // If we don't need to advance simulation this frame, we still need to
-    // transfer ownership back to graphics (graphics command buffer will acquire).
+    // transfer ownership back to graphics (graphics command buffer will
+    // acquire).
     if (substeps == 0) {
       addComputeToGraphicsBarriers(cmdBuffer, 0, 0,
                                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -1054,6 +1070,25 @@ public:
       }
     }
 
+    // Copy latest ParticleOut (binding=1) to host-visible staging buffer
+    // so CPU can export correct positions.
+    VkBufferMemoryBarrier copyBarrier =
+        vks::initializers::bufferMemoryBarrier();
+    copyBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    copyBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    copyBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    copyBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    copyBarrier.size = VK_WHOLE_SIZE;
+    copyBarrier.buffer = storageBuffers.output.buffer;
+    vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_FLAGS_NONE, 0,
+                         nullptr, 1, &copyBarrier, 0, nullptr);
+
+    VkBufferCopy copyRegion = {};
+    copyRegion.size = storageBufferSize;
+    vkCmdCopyBuffer(cmdBuffer, storageBuffers.output.buffer,
+                    outputReadback.buffer, 1, &copyRegion);
+
     // Release the storage buffers back to the graphics queue
     addComputeToGraphicsBarriers(cmdBuffer, VK_ACCESS_SHADER_WRITE_BIT, 0,
                                  VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -1083,7 +1118,8 @@ public:
       // Avoid unbounded catch-up if we fall behind
       if (TotalFrameTime >
           config.deltaT * static_cast<float>(maxSubstepsPerFrame)) {
-        TotalFrameTime = config.deltaT * static_cast<float>(maxSubstepsPerFrame);
+        TotalFrameTime =
+            config.deltaT * static_cast<float>(maxSubstepsPerFrame);
       }
       buildComputeCommandBuffer(substeps);
 
@@ -1142,6 +1178,21 @@ public:
 
       VulkanExampleBase::submitFrame(true);
     }
+    Framecount++;
+  }
+
+  virtual void writeMesh() { // Output mesh (read back after compute completes)
+    auto output = outputReadback.mapped;
+    auto particles = reinterpret_cast<Particle *>(output);
+    std::string filename =
+        "../../output/XPBDdfmb_" + std::to_string(Framecount) + ".vtk";
+    VtkOutput vtkoutput(filename);
+    for (int i = 0; i < beam3d.V.rows(); i++) {
+      beam3d.V(i, 0) = particles[i].pos.x;
+      beam3d.V(i, 1) = particles[i].pos.y;
+      beam3d.V(i, 2) = particles[i].pos.z;
+    }
+    vtkoutput.writeMesh<VtkCellType::TETRA>(beam3d.V, beam3d.tets);
   }
 };
 

@@ -83,7 +83,7 @@ public:
     struct UniformData {
       float deltaT{0.0f};
       float particleMass{0.19f};
-      float springStiffness{5e4};
+      float springStiffness{16778.523490};
       float damping{0.25f};
       float restDistH{0};
       float restDistV{0};
@@ -992,7 +992,7 @@ public:
 
     const uint32_t numParallelSets =
         static_cast<uint32_t>(compute.elemParallelSlots.size()) - 1;
-    const uint32_t constraintIterations = 10;
+    const uint32_t constraintIterations = 15;
 
     const uint32_t workgroupSizeXSet = 64;
     const uint32_t numParticlesStage2 = numParticles;
@@ -1139,6 +1139,7 @@ public:
       overlay->checkBox("Simulate wind", &simulateWind);
     }
   }
+  virtual void writeMesh() { int k; }
 };
 
 VULKAN_EXAMPLE_MAIN()

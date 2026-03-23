@@ -397,6 +397,7 @@ public:
   /** @brief (Pure virtual) Render function to be implemented by the sample
    * application */
   virtual void render() = 0;
+  virtual void writeMesh() = 0;
   /** @brief (Virtual) Called after a key was pressed, can be used to do custom
    * key handling */
   virtual void keyPressed(uint32_t);

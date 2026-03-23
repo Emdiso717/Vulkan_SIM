@@ -910,6 +910,8 @@ public:
       overlay->checkBox("Simulate wind", &simulateWind);
     }
   }
+
+  virtual void writeMesh() { int k; }
 };
 
 VULKAN_EXAMPLE_MAIN()

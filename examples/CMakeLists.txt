@@ -94,7 +94,6 @@ set(EXAMPLES
 	xpbddfmb3d
 	riddfmb3d
 	computecloth
-	test
 )
 
 buildExamples()

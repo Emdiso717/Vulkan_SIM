@@ -298,6 +298,7 @@ void VulkanExampleBase::nextFrame() {
   render();
   frameCounter++;
   auto tEnd = std::chrono::high_resolution_clock::now();
+  writeMesh();
 #if (defined(VK_USE_PLATFORM_IOS_MVK) || defined(VK_USE_PLATFORM_MACOS_MVK) || \
      defined(VK_USE_PLATFORM_METAL_EXT)) &&                                    \
     !defined(VK_EXAMPLE_XCODE_GENERATED)

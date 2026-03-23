@@ -1149,6 +1149,7 @@ public:
       VulkanExampleBase::submitFrame(true);
     }
   }
+  virtual void writeMesh() { int k; }
 };
 
 VULKAN_EXAMPLE_MAIN()
