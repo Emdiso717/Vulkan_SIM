@@ -14,6 +14,7 @@
 #include <ShellScalingAPI.h>
 #include <fcntl.h>
 #include <io.h>
+#include <thread>
 #include <windows.h>
 
 #elif defined(VK_USE_PLATFORM_ANDROID_KHR)
@@ -22,6 +23,8 @@
 #include <android/native_activity.h>
 #include <android_native_app_glue.h>
 #include <sys/system_properties.h>
+#include <chrono>
+#include <thread>
 
 #elif defined(VK_USE_PLATFORM_DIRECTFB_EXT)
 #include <directfb.h>
@@ -89,6 +92,7 @@ private:
   bool resizing = false;
   void handleMouseMove(int32_t x, int32_t y);
   void nextFrame();
+  void nextFrame_FixedFrame();
   void updateOverlay();
   void createPipelineCache();
   void createCommandPool();
@@ -109,6 +113,10 @@ protected:
   float FPStimer = 0.0f;
   std::chrono::time_point<std::chrono::high_resolution_clock> lastTimestamp,
       tPrevEnd;
+  // Separate timestamps for nextFrame_FixedFrame(), so its FPS statistics
+  // can be based on a monotonic clock (steady_clock).
+  std::chrono::time_point<std::chrono::steady_clock> lastTimestampFixed,
+      tPrevEndFixed;
   // Vulkan instance, stores all per-application states
   VkInstance instance{VK_NULL_HANDLE};
   std::vector<std::string> supportedInstanceExtensions;
@@ -183,6 +191,8 @@ public:
   /** @brief Last frame time measured using a high performance timer (if
    * available) */
   float frameTimer = 1.0f;
+
+  float FPS = 60.0f;
 
   vks::Benchmark benchmark;
 

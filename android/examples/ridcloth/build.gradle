@@ -65,6 +65,7 @@ task copyTask {
        into 'assets/textures'
        include 'vulkan_cloth_rgba.ktx'
     }
+    
 
 
 }

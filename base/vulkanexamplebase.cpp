@@ -293,12 +293,58 @@ VulkanExampleBase::loadShader(std::string fileName,
   return shaderStage;
 }
 
+void VulkanExampleBase::nextFrame_FixedFrame() {
+  writeMesh();
+  const float dtFixedMs = 1000.0f / FPS;     // ms
+  const float dtFixed = dtFixedMs / 1000.0f; // seconds (for simulation/camera)
+  const auto frameStart = std::chrono::steady_clock::now();
+
+  render();
+
+  frameCounter++;
+  frameTimer = dtFixed;
+  camera.update(frameTimer);
+  // Convert to clamped timer value (same semantics as nextFrame)
+  if (!paused) {
+    timer += timerSpeed * frameTimer;
+    if (timer > 1.0f) {
+      timer -= 1.0f;
+    }
+  }
+
+  // Force fixed pacing with sleep_until to avoid drift/precision issues.
+  const auto frameTargetEnd =
+      frameStart + std::chrono::duration<double, std::milli>(dtFixedMs);
+  const auto tEndBeforeSleep = std::chrono::steady_clock::now();
+  if (frameTargetEnd > tEndBeforeSleep) {
+    std::this_thread::sleep_until(frameTargetEnd);
+  }
+
+  // Total frame end time (include sleep) for FPS statistics (ms)
+  const auto tEndTotal = std::chrono::steady_clock::now();
+  FPStimer = (float)std::chrono::duration<double, std::milli>(
+                 tEndTotal - lastTimestampFixed)
+                 .count();
+  if (FPStimer > 1000.0f) {
+    lastFPS = static_cast<uint32_t>((float)frameCounter * (1000.0f / FPStimer));
+#if defined(_WIN32)
+    if (!settings.overlay) {
+      std::string windowTitle = getWindowTitle();
+      SetWindowText(window, windowTitle.c_str());
+    }
+#endif
+    frameCounter = 0;
+    lastTimestampFixed = tEndTotal;
+  }
+  tPrevEndFixed = tEndTotal;
+}
+
 void VulkanExampleBase::nextFrame() {
   auto tStart = std::chrono::high_resolution_clock::now();
   render();
   frameCounter++;
   auto tEnd = std::chrono::high_resolution_clock::now();
-  writeMesh();
+  // writeMesh();
 #if (defined(VK_USE_PLATFORM_IOS_MVK) || defined(VK_USE_PLATFORM_MACOS_MVK) || \
      defined(VK_USE_PLATFORM_METAL_EXT)) &&                                    \
     !defined(VK_EXAMPLE_XCODE_GENERATED)
@@ -371,6 +417,8 @@ void VulkanExampleBase::renderLoop() {
   destHeight = height;
   lastTimestamp = std::chrono::high_resolution_clock::now();
   tPrevEnd = lastTimestamp;
+  lastTimestampFixed = std::chrono::steady_clock::now();
+  tPrevEndFixed = lastTimestampFixed;
 #if defined(_WIN32)
   MSG msg;
   bool quitMessageReceived = false;
@@ -384,7 +432,8 @@ void VulkanExampleBase::renderLoop() {
       }
     }
     if (prepared && !IsIconic(window)) {
-      nextFrame();
+      // nextFrame();
+      nextFrame_FixedFrame();
     }
   }
 #elif defined(VK_USE_PLATFORM_ANDROID_KHR)

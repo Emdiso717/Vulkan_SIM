@@ -11,7 +11,7 @@ layout(std430, binding = 0) buffer ParticleIn { Particle particleIn[]; };
 
 layout(std430, binding = 1) buffer ParticleOut { Particle particleOut[]; };
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 2048) in;
 
 layout(binding = 2) uniform UBO {
   float deltaT;
@@ -61,14 +61,14 @@ void main() {
   if (index < particleIn.length()) {
     float t = 1.0;
     if (particleIn[index].vel.y < particleIn[index].pos.y) {
-      t = 0.9;
+      t = 0.99;
     }
     particleIn[index].vel.xyz =
         t * float(1 - fixedPoints[index]) *
         (particleIn[index].pos.xyz - particleIn[index].vel.xyz) /
         (params.deltaT);
     if (particleIn[index].pos.y <= -1.0 && particleIn[index].vel.y < 0.0) {
-      particleIn[index].vel.y = -particleIn[index].vel.y;
+      particleIn[index].vel.y = -0.1 * particleIn[index].vel.y;
       particleIn[index].pos.y = -1.0;
     }
     particleOut[index].pos = particleIn[index].pos;

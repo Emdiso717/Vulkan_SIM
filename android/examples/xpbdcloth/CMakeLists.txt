@@ -8,7 +8,7 @@ set(SRC_DIR ../../../examples/${NAME})
 set(BASE_DIR ../../../base)
 set(EXTERNAL_DIR ../../../external)
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++14 -DVK_USE_PLATFORM_ANDROID_KHR -DVK_NO_PROTOTYPES")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++20 -DVK_USE_PLATFORM_ANDROID_KHR -DVK_NO_PROTOTYPES")
 
 file(GLOB EXAMPLE_SRC "${SRC_DIR}/*.cpp")
 
@@ -23,6 +23,7 @@ set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -u ANativeActivity_o
 include_directories(${BASE_DIR})
 include_directories(${EXTERNAL_DIR})
 include_directories(${EXTERNAL_DIR}/glm)
+include_directories(${EXTERNAL_DIR}/eigen)
 include_directories(${EXTERNAL_DIR}/imgui)
 include_directories(${EXTERNAL_DIR}/tinygltf)
 include_directories(${ANDROID_NDK}/sources/android/native_app_glue)
