@@ -1,0 +1,9 @@
+# riddfmb3d runtime configuration
+# Usage: riddfmb3d --config examples/config.txt
+
+modelPath = models/beam3d_30x5x5_5tet_asc.vtk
+numSolverIterations = 1
+deltaT = 0.0033333333
+density = 1000.0
+gravity = 0.0 -9.8 0.0 0.0
+lame = 16442953.0 335570.4 0.0 0.0

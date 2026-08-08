@@ -9,8 +9,6 @@ struct Particle {
 
 layout(std430, binding = 0) buffer ParticleIn { Particle particleIn[]; };
 
-layout(std430, binding = 1) buffer ParticleOut { Particle particleOut[]; };
-
 layout(local_size_x = 64) in;
 
 layout(binding = 2) uniform UBO {
@@ -71,8 +69,5 @@ void main() {
       particleIn[index].vel.y = -0.3 * particleIn[index].vel.y;
       particleIn[index].pos.y = -1.0;
     }
-    particleOut[index].pos = particleIn[index].pos;
-    particleOut[index].vel = particleIn[index].vel;
-    particleOut[index].uv = particleIn[index].uv;
   }
 }

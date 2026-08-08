@@ -116,7 +116,7 @@ protected:
   // Separate timestamps for nextFrame_FixedFrame(), so its FPS statistics
   // can be based on a monotonic clock (steady_clock).
   std::chrono::time_point<std::chrono::steady_clock> lastTimestampFixed,
-      tPrevEndFixed;
+      tPrevEndFixed, nextFrameDeadlineFixed;
   // Vulkan instance, stores all per-application states
   VkInstance instance{VK_NULL_HANDLE};
   std::vector<std::string> supportedInstanceExtensions;

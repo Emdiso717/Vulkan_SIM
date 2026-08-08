@@ -297,7 +297,12 @@ void VulkanExampleBase::nextFrame_FixedFrame() {
   writeMesh();
   const float dtFixedMs = 1000.0f / FPS;     // ms
   const float dtFixed = dtFixedMs / 1000.0f; // seconds (for simulation/camera)
+  const auto fixedFrameDuration = std::chrono::duration_cast<
+      std::chrono::steady_clock::duration>(
+      std::chrono::duration<double>(dtFixed));
   const auto frameStart = std::chrono::steady_clock::now();
+  // nextFrameDeadlineFixed += fixedFrameDuration;
+  const auto frameDeadline = frameStart + fixedFrameDuration;
 
   render();
 
@@ -312,12 +317,11 @@ void VulkanExampleBase::nextFrame_FixedFrame() {
     }
   }
 
-  // Force fixed pacing with sleep_until to avoid drift/precision issues.
-  const auto frameTargetEnd =
-      frameStart + std::chrono::duration<double, std::milli>(dtFixedMs);
-  const auto tEndBeforeSleep = std::chrono::steady_clock::now();
-  if (frameTargetEnd > tEndBeforeSleep) {
-    std::this_thread::sleep_until(frameTargetEnd);
+  // Pace from this frame's start time using a full busy wait.
+  const auto tEndBeforeWait = std::chrono::steady_clock::now();
+  if (tEndBeforeWait < frameDeadline) {
+    while (std::chrono::steady_clock::now() < frameDeadline) {
+    }
   }
 
   // Total frame end time (include sleep) for FPS statistics (ms)
@@ -419,6 +423,7 @@ void VulkanExampleBase::renderLoop() {
   tPrevEnd = lastTimestamp;
   lastTimestampFixed = std::chrono::steady_clock::now();
   tPrevEndFixed = lastTimestampFixed;
+  nextFrameDeadlineFixed = lastTimestampFixed;
 #if defined(_WIN32)
   MSG msg;
   bool quitMessageReceived = false;
