@@ -17,6 +17,7 @@ layout(binding = 2) uniform UBO {
   vec4 gravity;
   vec4 lame;
   ivec2 particleCount;
+  vec4 ground;
 }
 params;
 

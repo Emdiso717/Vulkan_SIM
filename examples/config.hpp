@@ -85,6 +85,18 @@ inline bool parseUint32(const std::string &value, uint32_t &out) {
   return true;
 }
 
+inline bool parseBool(const std::string &value, bool &out) {
+  if (value == "true" || value == "1") {
+    out = true;
+    return true;
+  }
+  if (value == "false" || value == "0") {
+    out = false;
+    return true;
+  }
+  return false;
+}
+
 inline bool parseVec4(const std::string &value, glm::vec4 &out) {
   std::string normalized = value;
   std::replace(normalized.begin(), normalized.end(), ',', ' ');
@@ -154,11 +166,27 @@ inline bool loadTxt(const std::string &path, Entries &entries,
 struct Riddfmb3dConfiguration {
   std::string modelPath = "models/bunny_small(1).vtk";
   uint32_t numSolverIterations{1};
-  float deltaT{1.0f / 300.0f};
+  float deltaTInv{300.0f};
   float density{1000.0f};
   glm::vec4 gravity{0.0f, -9.8f, 0.0f, 0.0f};
-  glm::vec4 lame{16442953.0f, 335570.4f, 0.0f, 0.0f};
+  float youngsModulus{1000000.0f};
+  float poissonRatio{0.49f};
+  bool fixedPlaneEnabled{false};
+  glm::vec4 fixedPlaneNormal{1.0f, 0.0f, 0.0f, 0.0f};
+  float fixedPlaneOffset{0.0f};
+  float fixedPlaneTolerance{1e-4f};
+  bool groundEnabled{true};
+  float groundHeight{-1.0f};
+  float groundRestitution{0.3f};
 };
+
+inline glm::vec4 lameParameters(const Riddfmb3dConfiguration &config) {
+  const float lambda = config.youngsModulus * config.poissonRatio /
+                       ((1.0f + config.poissonRatio) *
+                        (1.0f - 2.0f * config.poissonRatio));
+  const float mu = config.youngsModulus / (2.0f * (1.0f + config.poissonRatio));
+  return glm::vec4(lambda, mu, 0.0f, 0.0f);
+}
 
 inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
                                        Riddfmb3dConfiguration &config) {
@@ -186,12 +214,13 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
         std::cerr << "riddfmb3d: invalid numSolverIterations at line "
                   << entry.line << "\n";
       }
-    } else if (key == "deltaT") {
+    } else if (key == "deltaTInv") {
       float parsed = 0.0f;
       if (parseFloat(value, parsed) && parsed > 0.0f) {
-        config.deltaT = parsed;
+        config.deltaTInv = parsed;
       } else {
-        std::cerr << "riddfmb3d: invalid deltaT at line " << entry.line << "\n";
+        std::cerr << "riddfmb3d: invalid deltaTInv at line " << entry.line
+                  << "\n";
       }
     } else if (key == "density") {
       float parsed = 0.0f;
@@ -209,12 +238,77 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
         std::cerr << "riddfmb3d: invalid gravity at line " << entry.line
                   << "\n";
       }
-    } else if (key == "lame") {
+    } else if (key == "youngsModulus") {
+      float parsed = 0.0f;
+      if (parseFloat(value, parsed) && parsed > 0.0f) {
+        config.youngsModulus = parsed;
+      } else {
+        std::cerr << "riddfmb3d: invalid youngsModulus at line "
+                  << entry.line << "\n";
+      }
+    } else if (key == "poissonRatio") {
+      float parsed = 0.0f;
+      if (parseFloat(value, parsed) && parsed > -1.0f && parsed < 0.5f) {
+        config.poissonRatio = parsed;
+      } else {
+        std::cerr << "riddfmb3d: poissonRatio must be in (-1, 0.5) at line "
+                  << entry.line << "\n";
+      }
+    } else if (key == "fixedPlaneEnabled") {
+      bool parsed = false;
+      if (parseBool(value, parsed)) {
+        config.fixedPlaneEnabled = parsed;
+      } else {
+        std::cerr << "riddfmb3d: invalid fixedPlaneEnabled at line "
+                  << entry.line << "\n";
+      }
+    } else if (key == "fixedPlaneNormal") {
       glm::vec4 parsed{};
       if (parseVec4(value, parsed)) {
-        config.lame = parsed;
+        config.fixedPlaneNormal = parsed;
       } else {
-        std::cerr << "riddfmb3d: invalid lame at line " << entry.line << "\n";
+        std::cerr << "riddfmb3d: invalid fixedPlaneNormal at line "
+                  << entry.line << "\n";
+      }
+    } else if (key == "fixedPlaneOffset") {
+      float parsed = 0.0f;
+      if (parseFloat(value, parsed)) {
+        config.fixedPlaneOffset = parsed;
+      } else {
+        std::cerr << "riddfmb3d: invalid fixedPlaneOffset at line "
+                  << entry.line << "\n";
+      }
+    } else if (key == "fixedPlaneTolerance") {
+      float parsed = 0.0f;
+      if (parseFloat(value, parsed) && parsed >= 0.0f) {
+        config.fixedPlaneTolerance = parsed;
+      } else {
+        std::cerr << "riddfmb3d: invalid fixedPlaneTolerance at line "
+                  << entry.line << "\n";
+      }
+    } else if (key == "groundEnabled") {
+      bool parsed = false;
+      if (parseBool(value, parsed)) {
+        config.groundEnabled = parsed;
+      } else {
+        std::cerr << "riddfmb3d: invalid groundEnabled at line " << entry.line
+                  << "\n";
+      }
+    } else if (key == "groundHeight") {
+      float parsed = 0.0f;
+      if (parseFloat(value, parsed)) {
+        config.groundHeight = parsed;
+      } else {
+        std::cerr << "riddfmb3d: invalid groundHeight at line " << entry.line
+                  << "\n";
+      }
+    } else if (key == "groundRestitution") {
+      float parsed = 0.0f;
+      if (parseFloat(value, parsed) && parsed >= 0.0f) {
+        config.groundRestitution = parsed;
+      } else {
+        std::cerr << "riddfmb3d: invalid groundRestitution at line "
+                  << entry.line << "\n";
       }
     } else {
       std::cerr << "riddfmb3d: unknown config key '" << key << "' at line "
@@ -222,13 +316,26 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
     }
   }
 
+  const glm::vec4 lame = lameParameters(config);
   std::cout << "riddfmb3d config: modelPath=" << config.modelPath
             << ", numSolverIterations=" << config.numSolverIterations
-            << ", deltaT=" << config.deltaT << ", density=" << config.density
+            << ", deltaTInv=" << config.deltaTInv
+            << ", deltaT=" << 1.0f / config.deltaTInv
+            << ", density=" << config.density
             << ", gravity=(" << config.gravity.x << ", " << config.gravity.y
             << ", " << config.gravity.z << ", " << config.gravity.w << ")"
-            << ", lame=(" << config.lame.x << ", " << config.lame.y << ", "
-            << config.lame.z << ", " << config.lame.w << ")\n";
+            << ", youngsModulus=" << config.youngsModulus
+            << ", poissonRatio=" << config.poissonRatio
+            << ", lame=(" << lame.x << ", " << lame.y << ", " << lame.z
+            << ", " << lame.w << ")"
+            << ", fixedPlaneEnabled=" << config.fixedPlaneEnabled
+            << ", fixedPlaneNormal=(" << config.fixedPlaneNormal.x << ", "
+            << config.fixedPlaneNormal.y << ", " << config.fixedPlaneNormal.z
+            << "), fixedPlaneOffset=" << config.fixedPlaneOffset
+            << ", fixedPlaneTolerance=" << config.fixedPlaneTolerance
+            << ", groundEnabled=" << config.groundEnabled
+            << ", groundHeight=" << config.groundHeight
+            << ", groundRestitution=" << config.groundRestitution << "\n";
 }
 
 } // namespace example_config

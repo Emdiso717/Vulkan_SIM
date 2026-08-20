@@ -1,9 +1,22 @@
 # riddfmb3d runtime configuration
 # Usage: riddfmb3d --config examples/config.txt
 
-modelPath = models/beam3d_30x5x5_5tet_asc.vtk
+modelPath = models/bunny.vtk
 numSolverIterations = 1
-deltaT = 0.0033333333
+# Simulation step is deltaT = 1 / deltaTInv.
+deltaTInv = 900.0
 density = 1000.0
 gravity = 0.0 -9.8 0.0 0.0
-lame = 16442953.0 335570.4 0.0 0.0
+youngsModulus = 1e6
+poissonRatio = 0.4
+
+# Cantilever beam: fix the x = 0 end plane.
+fixedPlaneEnabled = false
+fixedPlaneNormal = 1.0 0.0 0.0 0.0
+fixedPlaneOffset = 0.0
+fixedPlaneTolerance = 0.01
+
+# No collision plane: the cantilever is free to swing.
+groundEnabled = true
+groundHeight = -2.0
+groundRestitution = 1

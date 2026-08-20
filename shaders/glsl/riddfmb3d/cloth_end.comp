@@ -17,6 +17,7 @@ layout(binding = 2) uniform UBO {
   vec4 gravity;
   vec4 lame;
   ivec2 particleCount;
+  vec4 ground;
 }
 params;
 
@@ -63,11 +64,11 @@ void main() {
     }
     particleIn[index].vel.xyz =
         t * float(1 - fixedPoints[index]) *
-        (particleIn[index].pos.xyz - particleIn[index].vel.xyz) /
-        (params.deltaT);
-    if (particleIn[index].pos.y <= -1.0 && particleIn[index].vel.y < 0.0) {
-      particleIn[index].vel.y = -0.3 * particleIn[index].vel.y;
-      particleIn[index].pos.y = -1.0;
+        (particleIn[index].pos.xyz - particleIn[index].vel.xyz) / params.deltaT;
+    if (params.ground.z > 0.5 && particleIn[index].pos.y <= params.ground.x &&
+        particleIn[index].vel.y < 0.0) {
+      particleIn[index].vel.y = -params.ground.y * particleIn[index].vel.y;
+      particleIn[index].pos.y = params.ground.x;
     }
   }
 }

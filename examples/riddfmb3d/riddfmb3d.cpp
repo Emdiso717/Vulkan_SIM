@@ -93,6 +93,7 @@ public:
       alignas(16) glm::vec4 gravity{0.0f};
       glm::vec4 lame{0.0f};
       glm::ivec2 particleCount{0};
+      alignas(16) glm::vec4 ground{0.0f};
     } uniformData;
     std::vector<float> masses{};
     std::vector<ElementInfo> elementInfo;
@@ -137,6 +138,12 @@ public:
 
       // Compute
       compute.uniformBuffer.destroy();
+      compute.lambdaDBuffer.destroy();
+      compute.lambdaHBuffer.destroy();
+      compute.elementInfoBuffer.destroy();
+      compute.elemParallelSlotsBuffer.destroy();
+      compute.massesBuffer.destroy();
+      compute.fixedpointBuffer.destroy();
       vkDestroyPipelineLayout(device, compute.pipelineLayout, nullptr);
       vkDestroyDescriptorSetLayout(device, compute.descriptorSetLayout,
                                    nullptr);
@@ -521,6 +528,30 @@ public:
   void Boundarycondition() {
     uint32_t numParticles = static_cast<uint32_t>(beam3d.V.rows());
     compute.fixedpoint.resize(numParticles, 0);
+    if (!config.fixedPlaneEnabled) {
+      return;
+    }
+
+    const glm::vec3 normal(config.fixedPlaneNormal);
+    const float normalLength = glm::length(normal);
+    if (normalLength <= 1e-6f) {
+      std::cerr << "riddfmb3d: fixedPlaneNormal must not be zero\n";
+      return;
+    }
+
+    uint32_t fixedCount = 0;
+    for (uint32_t i = 0; i < numParticles; i++) {
+      const glm::vec3 position(beam3d.V(i, 0), beam3d.V(i, 1), beam3d.V(i, 2));
+      const float distance =
+          std::abs(glm::dot(normal, position) - config.fixedPlaneOffset) /
+          normalLength;
+      if (distance <= config.fixedPlaneTolerance) {
+        compute.fixedpoint[i] = 1;
+        fixedCount++;
+      }
+    }
+    std::cout << "riddfmb3d: fixed " << fixedCount
+              << " particles on the configured plane\n";
   }
 
   void buildElementInfoFromMesh() {
@@ -723,7 +754,7 @@ public:
         device, static_cast<uint32_t>(computeWriteDescriptorSets.size()),
         computeWriteDescriptorSets.data(), 0, NULL);
 
-    // Create pipelines (begin / solve / end)
+    // Create pipelines (begin / solve / ground / end)
     VkComputePipelineCreateInfo computePipelineCreateInfo =
         vks::initializers::computePipelineCreateInfo(compute.pipelineLayout, 0);
 
@@ -792,7 +823,7 @@ public:
 
   void updateComputeUBO() {
     if (!paused) {
-      compute.uniformData.deltaT = config.deltaT;
+      compute.uniformData.deltaT = 1.0f / config.deltaTInv;
     } else {
       compute.uniformData.deltaT = 0.0f;
     }
@@ -803,7 +834,10 @@ public:
   void applyConfigurationToCompute() {
     compute.uniformData.density = config.density;
     compute.uniformData.gravity = config.gravity;
-    compute.uniformData.lame = config.lame;
+    compute.uniformData.lame = example_config::lameParameters(config);
+    compute.uniformData.ground =
+        glm::vec4(config.groundHeight, config.groundRestitution,
+                  config.groundEnabled ? 1.0f : 0.0f, 0.0f);
   }
 
   void updateGraphicsUBO() {
@@ -994,11 +1028,10 @@ public:
           cmdBuffer,
           {storageBuffers.particles.buffer, compute.lambdaDBuffer.buffer});
 
-      // Stage 1: Constraint solving
-      vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                        compute.pipelines.solve);
-
+      // Stage 1: Internal RID constraint solving.
       for (uint32_t iter = 0; iter < constraintIterations; iter++) {
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          compute.pipelines.solve);
         for (uint32_t setIdx = 0; setIdx < numParallelSets; setIdx++) {
           pushConsts.parallelSetStartIndex = setIdx;
           vkCmdPushConstants(cmdBuffer, compute.pipelineLayout,
@@ -1019,11 +1052,9 @@ public:
                             compute.lambdaDBuffer.buffer});
           }
         }
-        if (iter < constraintIterations - 1) {
-          example_barriers::addComputeToComputeBarriers(
-              cmdBuffer,
-              {storageBuffers.particles.buffer, compute.lambdaDBuffer.buffer});
-        }
+        example_barriers::addComputeToComputeBarriers(
+            cmdBuffer,
+            {storageBuffers.particles.buffer, compute.lambdaDBuffer.buffer});
       }
 
       // Stage 2: End solve
@@ -1082,7 +1113,7 @@ public:
       VK_CHECK_RESULT(vkResetFences(device, 1, &compute.fences[currentBuffer]));
       updateComputeUBO();
       uint32_t substeps =
-          static_cast<uint32_t>(std::floor(1 / (FPS * config.deltaT)));
+          static_cast<uint32_t>(std::floor(config.deltaTInv / FPS));
       buildComputeCommandBuffer(substeps);
 
       VkPipelineStageFlags waitDstStageMask =
