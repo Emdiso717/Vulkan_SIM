@@ -1,0 +1,60 @@
+{
+  "_说明": "RID 参数扫描与精度比较配置。所有以 _ 开头的字段仅作说明，批处理脚本会忽略它们。路径可使用 /，并且相对于项目根目录 C:/zjucad/Vulkan 解析。",
+  "program": {
+    "_说明": "RID 可执行程序从 build 目录启动，以便现有资源与着色器路径正确解析。",
+    "executable": "build/bin/riddfmb3d.exe",
+    "workingDirectory": "build",
+    "baseConfig": "examples/config.txt",
+    "timeoutSeconds": 900
+  },
+  "export": {
+    "_说明": "每个 case 均导出静止帧 0 与之后的每一帧网格；输出目录按 case 名称隔离。",
+    "frameCount": 250,
+    "outputRoot": "output/rid_accuracy_sweep"
+  },
+  "simulation": {
+    "_说明": "除每个 case 单独指定的 deltaTInv、youngsModulus 外，其余 RID 物理参数。若不需要改动，可保持与 examples/config.txt 一致。",
+    "modelPath": "models/bunny_3828_asc.vtk",
+    "numSolverIterations": 1,
+    "density": 1000.0,
+    "damping": 1.5,
+    "gravity": [
+      0.0,
+      -20.0,
+      0.0,
+      0.0
+    ],
+    "poissonRatio": 0.4,
+    "fixedPlaneEnabled": true,
+    "fixedSelector": "Y_MAX",
+    "fixedRelativeThickness": 0.15,
+    "fixedPlaneNormal": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "fixedPlaneOffset": 0.0,
+    "fixedPlaneTolerance": 0.01,
+    "groundEnabled": false,
+    "groundHeight": -2.0,
+    "groundRestitution": 1.0
+  },
+  "comparison": {
+    "_说明": "逐帧比较 FEM 与 RID 的位移；两边网格必须有相同顶点数与顶点顺序。FEM 目录由 CSV 的 dir 列拼接得到。",
+    "referenceFilenamePattern": "tetmesh_frame_{frame}.vtk",
+    "testFilenamePattern": "RIDdfmb_{frame}.vtk",
+    "restFrame": 0,
+    "frames": "1:200",
+    "keyDisplacementThreshold": 0.2
+  },
+  "caseSource": {
+    "_说明": "所有测试组直接从 CSV 读取。deltaTInv 由 substeps × 60 自动计算；每行的 dir 会拼接到 femReferenceDirPrefix 后，得到 FEM 参考目录。",
+    "path": "scripts/test.csv",
+    "caseColumn": "case",
+    "substepsColumn": "substeps",
+    "youngsModulusColumn": "compensated_E_Pa",
+    "dirColumn": "dir",
+    "femReferenceDirPrefix": "C:/zjucad/Stiff-GIPC/Output_mesh/Output_"
+  }
+}

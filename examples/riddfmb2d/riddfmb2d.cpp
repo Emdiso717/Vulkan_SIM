@@ -79,12 +79,11 @@ public:
     } uniformData;
     std::vector<float> masses{};
     std::vector<ElementInfo> elementInfo;
-    std::vector<float> lambdaHData;
-    std::vector<float> lambdaDData;
+    // RID solves one scalar multiplier per element.
+    std::vector<float> lambdaData;
     std::vector<int> elemParallelSlots;
     vks::Buffer uniformBuffer;
-    vks::Buffer lambdaHBuffer;
-    vks::Buffer lambdaDBuffer;
+    vks::Buffer lambdaBuffer;
     vks::Buffer elementInfoBuffer;
     vks::Buffer elemParallelSlotsBuffer;
     vks::Buffer massesBuffer;
@@ -305,8 +304,7 @@ public:
 
     stagingBuffer.destroy();
     uint32_t numElements = static_cast<uint32_t>(compute.elementInfo.size());
-    compute.lambdaDData.resize(numElements, 0.0f);
-    compute.lambdaHData.resize(numElements, 0.0f);
+    compute.lambdaData.resize(numElements, 0.0f);
     // ElementInfo buffer
     VkDeviceSize elementInfoBufferSize = numElements * sizeof(ElementInfo);
     vks::Buffer stagingElementInfoBuffer;
@@ -319,29 +317,18 @@ public:
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &compute.elementInfoBuffer,
         elementInfoBufferSize);
-    // LambdaD buffer
+    // RID multiplier buffer
     VkDeviceSize lambdaBufferSize = numElements * sizeof(float);
     vks::Buffer stagingLambdaBuffer;
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                &stagingLambdaBuffer, lambdaBufferSize,
-                               compute.lambdaDData.data());
+                               compute.lambdaData.data());
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                               &compute.lambdaDBuffer, lambdaBufferSize);
-    // LambdaH buffer
-    vks::Buffer stagingLambdaHBuffer;
-    vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                               &stagingLambdaHBuffer, lambdaBufferSize,
-                               compute.lambdaHData.data());
-    vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                               &compute.lambdaHBuffer, lambdaBufferSize);
+                               &compute.lambdaBuffer, lambdaBufferSize);
     // mass buffer
     vks::Buffer stagingMassesBuffer;
     VkDeviceSize massesBufferSize = compute.masses.size() * sizeof(float);
@@ -388,9 +375,7 @@ public:
                     compute.elementInfoBuffer.buffer, 1, &copyRegion);
     copyRegion.size = lambdaBufferSize;
     vkCmdCopyBuffer(copyCmd, stagingLambdaBuffer.buffer,
-                    compute.lambdaDBuffer.buffer, 1, &copyRegion);
-    vkCmdCopyBuffer(copyCmd, stagingLambdaHBuffer.buffer,
-                    compute.lambdaHBuffer.buffer, 1, &copyRegion);
+                    compute.lambdaBuffer.buffer, 1, &copyRegion);
     copyRegion.size = massesBufferSize;
     vkCmdCopyBuffer(copyCmd, stagingMassesBuffer.buffer,
                     compute.massesBuffer.buffer, 1, &copyRegion);
@@ -405,7 +390,6 @@ public:
     stagingElementInfoBuffer.destroy();
     stagingLambdaBuffer.destroy();
     stagingElemParallelSlotsBuffer.destroy();
-    stagingLambdaHBuffer.destroy();
     stagingMassesBuffer.destroy();
     stagingfixedpointBuffer.destroy();
   }
@@ -691,8 +675,6 @@ public:
         vks::initializers::descriptorSetLayoutBinding(
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 6),
         vks::initializers::descriptorSetLayoutBinding(
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 7),
-        vks::initializers::descriptorSetLayoutBinding(
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 8),
     };
 
@@ -734,7 +716,7 @@ public:
             &compute.uniformBuffer.descriptor),
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3,
-            &compute.lambdaDBuffer.descriptor),
+            &compute.lambdaBuffer.descriptor),
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4,
             &compute.elementInfoBuffer.descriptor),
@@ -744,9 +726,6 @@ public:
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6,
             &compute.massesBuffer.descriptor),
-        vks::initializers::writeDescriptorSet(
-            compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7,
-            &compute.lambdaHBuffer.descriptor),
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8,
             &compute.fixedpointBuffer.descriptor)};
@@ -760,21 +739,21 @@ public:
         vks::initializers::computePipelineCreateInfo(compute.pipelineLayout, 0);
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "riddfmb2d/cloth_begin.comp.spv",
+        loadShader(getShadersPath() + "riddfmb2d/rid_begin.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(
         device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
         &compute.pipelines.begin));
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "riddfmb2d/cloth_solve.comp.spv",
+        loadShader(getShadersPath() + "riddfmb2d/rid_solve.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(
         device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
         &compute.pipelines.solve));
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "riddfmb2d/cloth_end.comp.spv",
+        loadShader(getShadersPath() + "riddfmb2d/rid_end.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1,
                                              &computePipelineCreateInfo,
@@ -945,7 +924,7 @@ public:
     // Dispatch for all particles
     auto &verts = modelBeam2d.cpuVertices;
     uint32_t numParticles = verts.size();
-    uint32_t numLambda = compute.lambdaDData.size();
+    uint32_t numLambda = compute.lambdaData.size();
     uint32_t workgroupSizeX = 64;
     uint32_t numWorkgroupsX =
         (std::max(numParticles, numLambda) + workgroupSizeX - 1) /

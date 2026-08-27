@@ -297,9 +297,9 @@ void VulkanExampleBase::nextFrame_FixedFrame() {
   writeMesh();
   const float dtFixedMs = 1000.0f / FPS;     // ms
   const float dtFixed = dtFixedMs / 1000.0f; // seconds (for simulation/camera)
-  const auto fixedFrameDuration = std::chrono::duration_cast<
-      std::chrono::steady_clock::duration>(
-      std::chrono::duration<double>(dtFixed));
+  const auto fixedFrameDuration =
+      std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(dtFixed));
   const auto frameStart = std::chrono::steady_clock::now();
   // nextFrameDeadlineFixed += fixedFrameDuration;
   const auto frameDeadline = frameStart + fixedFrameDuration;

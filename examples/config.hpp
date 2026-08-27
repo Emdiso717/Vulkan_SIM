@@ -64,6 +64,27 @@ inline bool hasCommandLineFlag(const std::vector<const char *> &args,
   });
 }
 
+// Returns the value passed as either "--option value" or "--option=value".
+// An empty return value means the option was not supplied (or was supplied
+// without a value).
+inline std::string getCommandLineOption(const std::vector<const char *> &args,
+                                        const std::string &option) {
+  const std::string equalsPrefix = option + "=";
+  for (size_t i = 1; i < args.size(); ++i) {
+    if (args[i] == nullptr) {
+      continue;
+    }
+    const std::string arg = args[i];
+    if (arg.rfind(equalsPrefix, 0) == 0) {
+      return arg.substr(equalsPrefix.size());
+    }
+    if (arg == option && i + 1 < args.size() && args[i + 1] != nullptr) {
+      return args[i + 1];
+    }
+  }
+  return "";
+}
+
 inline bool parseFloat(const std::string &value, float &out) {
   char *end = nullptr;
   const float parsed = std::strtof(value.c_str(), &end);
@@ -168,10 +189,14 @@ struct Riddfmb3dConfiguration {
   uint32_t numSolverIterations{1};
   float deltaTInv{300.0f};
   float density{1000.0f};
+  // Per-second mass-proportional damping rate, applied to velocity each step.
+  float damping{0.0f};
   glm::vec4 gravity{0.0f, -9.8f, 0.0f, 0.0f};
   float youngsModulus{1000000.0f};
   float poissonRatio{0.49f};
   bool fixedPlaneEnabled{false};
+  std::string fixedSelector{"PLANE"};
+  float fixedRelativeThickness{0.0f};
   glm::vec4 fixedPlaneNormal{1.0f, 0.0f, 0.0f, 0.0f};
   float fixedPlaneOffset{0.0f};
   float fixedPlaneTolerance{1e-4f};
@@ -230,6 +255,14 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
         std::cerr << "riddfmb3d: invalid density at line " << entry.line
                   << "\n";
       }
+    } else if (key == "damping") {
+      float parsed = 0.0f;
+      if (parseFloat(value, parsed) && parsed >= 0.0f) {
+        config.damping = parsed;
+      } else {
+        std::cerr << "riddfmb3d: damping must be non-negative at line "
+                  << entry.line << "\n";
+      }
     } else if (key == "gravity") {
       glm::vec4 parsed{};
       if (parseVec4(value, parsed)) {
@@ -261,6 +294,21 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
       } else {
         std::cerr << "riddfmb3d: invalid fixedPlaneEnabled at line "
                   << entry.line << "\n";
+      }
+    } else if (key == "fixedSelector") {
+      if (value == "PLANE" || value == "Y_MAX") {
+        config.fixedSelector = value;
+      } else {
+        std::cerr << "riddfmb3d: fixedSelector must be PLANE or Y_MAX at line "
+                  << entry.line << "\n";
+      }
+    } else if (key == "fixedRelativeThickness") {
+      float parsed = 0.0f;
+      if (parseFloat(value, parsed) && parsed > 0.0f && parsed <= 1.0f) {
+        config.fixedRelativeThickness = parsed;
+      } else {
+        std::cerr << "riddfmb3d: fixedRelativeThickness must be in (0, 1] at "
+                  << "line " << entry.line << "\n";
       }
     } else if (key == "fixedPlaneNormal") {
       glm::vec4 parsed{};
@@ -322,6 +370,7 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
             << ", deltaTInv=" << config.deltaTInv
             << ", deltaT=" << 1.0f / config.deltaTInv
             << ", density=" << config.density
+            << ", damping=" << config.damping
             << ", gravity=(" << config.gravity.x << ", " << config.gravity.y
             << ", " << config.gravity.z << ", " << config.gravity.w << ")"
             << ", youngsModulus=" << config.youngsModulus
@@ -329,6 +378,8 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
             << ", lame=(" << lame.x << ", " << lame.y << ", " << lame.z
             << ", " << lame.w << ")"
             << ", fixedPlaneEnabled=" << config.fixedPlaneEnabled
+            << ", fixedSelector=" << config.fixedSelector
+            << ", fixedRelativeThickness=" << config.fixedRelativeThickness
             << ", fixedPlaneNormal=(" << config.fixedPlaneNormal.x << ", "
             << config.fixedPlaneNormal.y << ", " << config.fixedPlaneNormal.z
             << "), fixedPlaneOffset=" << config.fixedPlaneOffset

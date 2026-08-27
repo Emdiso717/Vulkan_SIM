@@ -14,6 +14,7 @@ layout(local_size_x = 64) in;
 layout(binding = 2) uniform UBO {
   float deltaT;
   float density;
+  float damping;
   vec4 gravity;
   vec4 lame;
   ivec2 particleCount;
@@ -29,7 +30,7 @@ struct ElementInfo {
   mat3x3 restShapeInv;
 };
 
-layout(std430, binding = 3) buffer LambdaDBuffer { float _lambdaD[]; };
+layout(std430, binding = 3) buffer LambdaBuffer { float _lambda[]; };
 
 layout(std430, binding = 4) buffer ElementInfoBuffer {
   ElementInfo elementInfo[];
@@ -40,7 +41,6 @@ layout(std430, binding = 5) buffer ElemParallelSlotsBuffer {
 };
 
 layout(std430, binding = 6) buffer MassesBuffer { float masses[]; };
-layout(std430, binding = 7) buffer LambdaHBuffer { float _lambdaH[]; };
 layout(std430, binding = 8) buffer FixedPointBuffer { int fixedPoints[]; };
 
 layout(push_constant) uniform PushConsts { uint parallelSetStartIndex; }
@@ -65,8 +65,7 @@ void main() {
     particleIn[index].pos.xyz += float(1.0 - fixedPoints[index]) * dx;
   }
 
-  if (index < _lambdaD.length()) {
-    _lambdaD[index] = 0;
-    _lambdaH[index] = 0;
+  if (index < _lambda.length()) {
+    _lambda[index] = 0;
   }
 }

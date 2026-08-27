@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <readMesh3d.hpp>
 
 class VulkanExample : public VulkanExampleBase {
@@ -23,6 +24,8 @@ public:
   uint32_t readbackFenceIndex{0};
   uint32_t readbackFrame{0};
   uint32_t Framecount{0};
+  uint32_t vtkFrameLimit{0};
+  std::filesystem::path vtkOutputDirectory{"../output"};
   example_config::Riddfmb3dConfiguration config;
 
   struct Particle {
@@ -90,6 +93,7 @@ public:
     struct UniformData {
       float deltaT{0.0f};
       float density{0.0f};
+      float damping{0.0f};
       alignas(16) glm::vec4 gravity{0.0f};
       glm::vec4 lame{0.0f};
       glm::ivec2 particleCount{0};
@@ -97,12 +101,11 @@ public:
     } uniformData;
     std::vector<float> masses{};
     std::vector<ElementInfo> elementInfo;
-    std::vector<float> lambdaHData;
-    std::vector<float> lambdaDData;
+    // RID solves one scalar multiplier per element.
+    std::vector<float> lambdaData;
     std::vector<int> elemParallelSlots;
     vks::Buffer uniformBuffer;
-    vks::Buffer lambdaHBuffer;
-    vks::Buffer lambdaDBuffer;
+    vks::Buffer lambdaBuffer;
     vks::Buffer elementInfoBuffer;
     vks::Buffer elemParallelSlotsBuffer;
     vks::Buffer massesBuffer;
@@ -138,8 +141,7 @@ public:
 
       // Compute
       compute.uniformBuffer.destroy();
-      compute.lambdaDBuffer.destroy();
-      compute.lambdaHBuffer.destroy();
+      compute.lambdaBuffer.destroy();
       compute.elementInfoBuffer.destroy();
       compute.elemParallelSlotsBuffer.destroy();
       compute.massesBuffer.destroy();
@@ -272,8 +274,7 @@ public:
 
     stagingBuffer.destroy();
     uint32_t numElements = static_cast<uint32_t>(compute.elementInfo.size());
-    compute.lambdaDData.resize(numElements, 0.0f);
-    compute.lambdaHData.resize(numElements, 0.0f);
+    compute.lambdaData.resize(numElements, 0.0f);
     // ElementInfo buffer
     VkDeviceSize elementInfoBufferSize = numElements * sizeof(ElementInfo);
     vks::Buffer stagingElementInfoBuffer;
@@ -286,29 +287,18 @@ public:
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, &compute.elementInfoBuffer,
         elementInfoBufferSize);
-    // LambdaD buffer
+    // RID multiplier buffer
     const VkDeviceSize lambdaBufferSize = numElements * sizeof(float);
     vks::Buffer stagingLambdaBuffer;
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                                &stagingLambdaBuffer, lambdaBufferSize,
-                               compute.lambdaDData.data());
+                               compute.lambdaData.data());
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                               &compute.lambdaDBuffer, lambdaBufferSize);
-    // LambdaH buffer
-    vks::Buffer stagingLambdaHBuffer;
-    vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                               &stagingLambdaHBuffer, lambdaBufferSize,
-                               compute.lambdaHData.data());
-    vulkanDevice->createBuffer(VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                                   VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                               VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                               &compute.lambdaHBuffer, lambdaBufferSize);
+                               &compute.lambdaBuffer, lambdaBufferSize);
     // mass buffer
     vks::Buffer stagingMassesBuffer;
     VkDeviceSize massesBufferSize = compute.masses.size() * sizeof(float);
@@ -355,9 +345,7 @@ public:
                     compute.elementInfoBuffer.buffer, 1, &copyRegion);
     copyRegion.size = lambdaBufferSize;
     vkCmdCopyBuffer(copyCmd, stagingLambdaBuffer.buffer,
-                    compute.lambdaDBuffer.buffer, 1, &copyRegion);
-    vkCmdCopyBuffer(copyCmd, stagingLambdaHBuffer.buffer,
-                    compute.lambdaHBuffer.buffer, 1, &copyRegion);
+                    compute.lambdaBuffer.buffer, 1, &copyRegion);
     copyRegion.size = massesBufferSize;
     vkCmdCopyBuffer(copyCmd, stagingMassesBuffer.buffer,
                     compute.massesBuffer.buffer, 1, &copyRegion);
@@ -373,8 +361,8 @@ public:
     // acquires them before binding the compute pipeline.
     example_barriers::addGraphicsToComputeBarriers(
         copyCmd,
-        {compute.elementInfoBuffer.buffer, compute.lambdaDBuffer.buffer,
-         compute.lambdaHBuffer.buffer, compute.massesBuffer.buffer,
+        {compute.elementInfoBuffer.buffer, compute.lambdaBuffer.buffer,
+         compute.massesBuffer.buffer,
          compute.fixedpointBuffer.buffer,
          compute.elemParallelSlotsBuffer.buffer},
         dedicatedComputeQueue, vulkanDevice->queueFamilyIndices.graphics,
@@ -386,7 +374,6 @@ public:
     stagingElementInfoBuffer.destroy();
     stagingLambdaBuffer.destroy();
     stagingElemParallelSlotsBuffer.destroy();
-    stagingLambdaHBuffer.destroy();
     stagingMassesBuffer.destroy();
     stagingfixedpointBuffer.destroy();
   }
@@ -529,6 +516,48 @@ public:
     uint32_t numParticles = static_cast<uint32_t>(beam3d.V.rows());
     compute.fixedpoint.resize(numParticles, 0);
     if (!config.fixedPlaneEnabled) {
+      return;
+    }
+
+    if (config.fixedSelector == "Y_MAX") {
+      // Fix the upper relative-thickness portion of the mesh Y extent.
+      if (config.fixedRelativeThickness <= 0.0f ||
+          config.fixedRelativeThickness > 1.0f) {
+        std::cerr << "riddfmb3d: Y_MAX requires fixedRelativeThickness in "
+                     "(0, 1]\n";
+        return;
+      }
+      if (numParticles == 0) {
+        std::cerr << "riddfmb3d: cannot select Y_MAX on an empty mesh\n";
+        return;
+      }
+
+      float yMin = std::numeric_limits<float>::max();
+      float yMax = std::numeric_limits<float>::lowest();
+      for (uint32_t i = 0; i < numParticles; i++) {
+        const float y = beam3d.V(i, 1);
+        yMin = std::min(yMin, y);
+        yMax = std::max(yMax, y);
+      }
+
+      const float selectionStart =
+          yMax - (yMax - yMin) * config.fixedRelativeThickness;
+      uint32_t yMaxFixedCount = 0;
+      for (uint32_t i = 0; i < numParticles; i++) {
+        if (beam3d.V(i, 1) >= selectionStart) {
+          compute.fixedpoint[i] = 1;
+          yMaxFixedCount++;
+        }
+      }
+      std::cout << "riddfmb3d: fixed " << yMaxFixedCount
+                << " particles using Y_MAX with relative thickness "
+                << config.fixedRelativeThickness << "\n";
+      return;
+    }
+
+    if (config.fixedSelector != "PLANE") {
+      std::cerr << "riddfmb3d: unsupported fixed selector '"
+                << config.fixedSelector << "'\n";
       return;
     }
 
@@ -693,8 +722,6 @@ public:
         vks::initializers::descriptorSetLayoutBinding(
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 6),
         vks::initializers::descriptorSetLayoutBinding(
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 7),
-        vks::initializers::descriptorSetLayoutBinding(
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 8),
     };
 
@@ -733,7 +760,7 @@ public:
             &compute.uniformBuffer.descriptor),
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3,
-            &compute.lambdaDBuffer.descriptor),
+            &compute.lambdaBuffer.descriptor),
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4,
             &compute.elementInfoBuffer.descriptor),
@@ -743,9 +770,6 @@ public:
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6,
             &compute.massesBuffer.descriptor),
-        vks::initializers::writeDescriptorSet(
-            compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7,
-            &compute.lambdaHBuffer.descriptor),
         vks::initializers::writeDescriptorSet(
             compute.descriptorSets[0], VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8,
             &compute.fixedpointBuffer.descriptor)};
@@ -759,21 +783,21 @@ public:
         vks::initializers::computePipelineCreateInfo(compute.pipelineLayout, 0);
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "riddfmb3d/cloth_begin.comp.spv",
+        loadShader(getShadersPath() + "riddfmb3d/rid_begin.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(
         device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
         &compute.pipelines.begin));
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "riddfmb3d/cloth_solve.comp.spv",
+        loadShader(getShadersPath() + "riddfmb3d/rid_solve.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(
         device, pipelineCache, 1, &computePipelineCreateInfo, nullptr,
         &compute.pipelines.solve));
 
     computePipelineCreateInfo.stage =
-        loadShader(getShadersPath() + "riddfmb3d/cloth_end.comp.spv",
+        loadShader(getShadersPath() + "riddfmb3d/rid_end.comp.spv",
                    VK_SHADER_STAGE_COMPUTE_BIT);
     VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1,
                                              &computePipelineCreateInfo,
@@ -833,6 +857,7 @@ public:
 
   void applyConfigurationToCompute() {
     compute.uniformData.density = config.density;
+    compute.uniformData.damping = config.damping;
     compute.uniformData.gravity = config.gravity;
     compute.uniformData.lame = example_config::lameParameters(config);
     compute.uniformData.ground =
@@ -854,7 +879,31 @@ public:
     example_config::loadRiddfmb3dConfiguration(args, config);
     writeVtk = example_config::hasCommandLineFlag(args, "--write-vtk");
     if (writeVtk) {
+      const std::string outputDirectory = example_config::getCommandLineOption(
+          args, "--vtk-output-dir");
+      if (!outputDirectory.empty()) {
+        vtkOutputDirectory = outputDirectory;
+      }
+      std::filesystem::create_directories(vtkOutputDirectory);
+
+      const std::string frameLimit = example_config::getCommandLineOption(
+          args, "--vtk-frame-limit");
+      if (!frameLimit.empty()) {
+        uint32_t parsedFrameLimit = 0;
+        if (example_config::parseUint32(frameLimit, parsedFrameLimit) &&
+            parsedFrameLimit > 0) {
+          vtkFrameLimit = parsedFrameLimit;
+        } else {
+          std::cerr << "riddfmb3d: --vtk-frame-limit must be a positive "
+                       "integer; automatic stop is disabled\n";
+        }
+      }
       std::cout << "riddfmb3d: VTK export enabled\n";
+      std::cout << "riddfmb3d: VTK output directory: "
+                << vtkOutputDirectory.string() << "\n";
+      if (vtkFrameLimit > 0) {
+        std::cout << "riddfmb3d: VTK frame limit: " << vtkFrameLimit << "\n";
+      }
     }
     applyConfigurationToCompute();
     // Check whether the compute queue family is distinct from the graphics
@@ -863,6 +912,11 @@ public:
                             vulkanDevice->queueFamilyIndices.compute;
     std::cout << dedicatedComputeQueue << std::endl;
     buildElementInfoFromMesh();
+    if (writeVtk) {
+      // Frame 0 is the undeformed mesh.  Dynamic states are exported from
+      // frame 1 onward so this file is never overwritten by the first solve.
+      writeRestMesh();
+    }
     precompute();
     Boundarycondition();
     prepareStorageBuffers();
@@ -967,8 +1021,8 @@ public:
       // owned by the compute queue for the lifetime of the example.
       example_barriers::addGraphicsToComputeBarriers(
           cmdBuffer,
-          {compute.elementInfoBuffer.buffer, compute.lambdaDBuffer.buffer,
-           compute.lambdaHBuffer.buffer, compute.massesBuffer.buffer,
+          {compute.elementInfoBuffer.buffer, compute.lambdaBuffer.buffer,
+           compute.massesBuffer.buffer,
            compute.fixedpointBuffer.buffer,
            compute.elemParallelSlotsBuffer.buffer},
           dedicatedComputeQueue, vulkanDevice->queueFamilyIndices.graphics,
@@ -1000,7 +1054,7 @@ public:
 
     const uint32_t numParticles = static_cast<uint32_t>(beam3d.V.rows());
     const uint32_t numLambda =
-        static_cast<uint32_t>(compute.lambdaDData.size());
+        static_cast<uint32_t>(compute.lambdaData.size());
     const uint32_t workgroupSizeX = 64;
     const uint32_t numWorkgroupsX =
         (std::max(numParticles, numLambda) + workgroupSizeX - 1) /
@@ -1026,7 +1080,7 @@ public:
       // Barrier after begin solve
       example_barriers::addComputeToComputeBarriers(
           cmdBuffer,
-          {storageBuffers.particles.buffer, compute.lambdaDBuffer.buffer});
+          {storageBuffers.particles.buffer, compute.lambdaBuffer.buffer});
 
       // Stage 1: Internal RID constraint solving.
       for (uint32_t iter = 0; iter < constraintIterations; iter++) {
@@ -1049,12 +1103,12 @@ public:
           if (setIdx < numParallelSets - 1) {
             example_barriers::addComputeToComputeBarriers(
                 cmdBuffer, {storageBuffers.particles.buffer,
-                            compute.lambdaDBuffer.buffer});
+                            compute.lambdaBuffer.buffer});
           }
         }
         example_barriers::addComputeToComputeBarriers(
             cmdBuffer,
-            {storageBuffers.particles.buffer, compute.lambdaDBuffer.buffer});
+            {storageBuffers.particles.buffer, compute.lambdaBuffer.buffer});
       }
 
       // Stage 2: End solve
@@ -1066,7 +1120,7 @@ public:
       if (step + 1 < substeps) {
         example_barriers::addComputeToComputeBarriers(
             cmdBuffer,
-            {storageBuffers.particles.buffer, compute.lambdaDBuffer.buffer});
+            {storageBuffers.particles.buffer, compute.lambdaBuffer.buffer});
       }
     }
 
@@ -1134,7 +1188,8 @@ public:
       if (writeVtk && substeps > 0) {
         readbackPending = true;
         readbackFenceIndex = currentBuffer;
-        readbackFrame = Framecount;
+        // Frame 0 is the rest state written in prepare().
+        readbackFrame = Framecount + 1;
       }
     }
 
@@ -1173,6 +1228,22 @@ public:
       VulkanExampleBase::submitFrame(true);
     }
     Framecount++;
+    if (writeVtk && vtkFrameLimit > 0 && Framecount >= vtkFrameLimit) {
+      // The frame just submitted has a pending readback.  Flush it before
+      // asking the Windows message loop to exit, so frames 0..frameLimit are
+      // all present on disk when a batch job completes.
+      writeMesh();
+#if defined(_WIN32)
+      PostQuitMessage(0);
+#endif
+    }
+  }
+
+  void writeRestMesh() const {
+    std::filesystem::create_directories(vtkOutputDirectory);
+    const std::filesystem::path outputPath = vtkOutputDirectory / "RIDdfmb_0.vtk";
+    VtkOutput vtkoutput(outputPath);
+    vtkoutput.writeMesh<VtkCellType::TETRA>(beam3d.V, beam3d.tets);
   }
 
   virtual void writeMesh() {
@@ -1190,10 +1261,10 @@ public:
       beam3d.V(i, 2) = particles[i].pos.z;
     }
 
-    const std::filesystem::path outputDirectory{"../output"};
-    std::filesystem::create_directories(outputDirectory);
+    std::filesystem::create_directories(vtkOutputDirectory);
     const std::filesystem::path outputPath =
-        outputDirectory / ("RIDdfmb_" + std::to_string(readbackFrame) + ".vtk");
+        vtkOutputDirectory /
+        ("RIDdfmb_" + std::to_string(readbackFrame) + ".vtk");
     VtkOutput vtkoutput(outputPath);
     vtkoutput.writeMesh<VtkCellType::TETRA>(beam3d.V, beam3d.tets);
     readbackPending = false;
