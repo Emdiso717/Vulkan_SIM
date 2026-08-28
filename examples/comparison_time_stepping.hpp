@@ -1,13 +1,15 @@
 #pragma once
 
 // Shared fixed-rate time-stepping configuration for the solver-comparison
-// samples.  The JSON configuration has four required fields:
+// samples.  The JSON configuration has four required fields and one optional
+// scene selector:
 //
 // {
 //   "substepsPerFrame": 20,
 //   "youngsModulus": 1.0e6,
 //   "poissonRatio": 0.40,
-//   "gravity": 9.8
+//   "gravity": 9.8,
+//   "scene": "cantilever"
 // }
 
 #include <cmath>
@@ -36,6 +38,8 @@ struct Configuration {
   float poissonRatio{0.40f};
   // Magnitude only. The comparison uses a fixed negative-Y gravity direction.
   float gravityMagnitude{9.8f};
+  // Supported values: "cantilever", "beam_twist_3pi", and "bunny_squash".
+  std::string scene{"cantilever"};
 };
 
 inline bool readTextResource(const std::string &path, std::string &contents) {
@@ -130,6 +134,23 @@ inline bool loadConfiguration(const std::string &path, Configuration &config) {
   parsed.youngsModulus = youngsIt->get<float>();
   parsed.poissonRatio = poissonIt->get<float>();
   parsed.gravityMagnitude = gravityIt->get<float>();
+  const auto sceneIt = document.find("scene");
+  if (sceneIt != document.end()) {
+    if (!sceneIt->is_string()) {
+      std::cerr << "comparison time stepping: scene in '" << path
+                << "' must be a string; using built-in comparison parameters\n";
+      return false;
+    }
+    parsed.scene = sceneIt->get<std::string>();
+    if (parsed.scene != "cantilever" &&
+        parsed.scene != "beam_twist_3pi" &&
+        parsed.scene != "bunny_squash") {
+      std::cerr << "comparison time stepping: scene in '" << path
+                << "' must be cantilever, beam_twist_3pi, or bunny_squash; "
+                   "using built-in comparison parameters\n";
+      return false;
+    }
+  }
   if (!std::isfinite(parsed.youngsModulus) ||
       parsed.youngsModulus < 1.0e5f || parsed.youngsModulus > 1.0e8f ||
       !std::isfinite(parsed.poissonRatio) || parsed.poissonRatio < 0.30f ||
@@ -149,7 +170,8 @@ inline bool loadConfiguration(const std::string &path, Configuration &config) {
             << kFrameDeltaT / static_cast<float>(config.substepsPerFrame)
             << ", E=" << config.youngsModulus
             << ", Pr=" << config.poissonRatio
-            << ", gravity=(0, -" << config.gravityMagnitude << ", 0)\n";
+            << ", gravity=(0, -" << config.gravityMagnitude << ", 0)"
+            << ", scene=" << config.scene << "\n";
   return true;
 }
 

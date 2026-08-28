@@ -1,14 +1,15 @@
-#include "VulkanglTFModel.h"
 #include "../comparison_time_stepping.hpp"
+#include "VulkanglTFModel.h"
 #include "glm/gtc/matrix_transform.hpp"
 #include "readMesh3d.hpp"
 #include "vtkio.hpp"
 #include "vulkanexamplebase.h"
 
+
 #include <algorithm>
 #include <array>
-#include <cstddef>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -16,6 +17,7 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
 
 namespace {
 
@@ -71,6 +73,7 @@ class VulkanExample : public VulkanExampleBase {
 public:
   struct Configuration {
     std::string modelPath{"models/beam3d.vtk"};
+    std::string scene{"cantilever"};
     uint32_t iterations{1};
     uint32_t substeps{20};
     float density{1000.0f};
@@ -133,12 +136,24 @@ public:
     uint32_t elementCount{0};
   };
 
+  // Matches the file-backed vksim beam-3pi protocol.  Each endpoint receives
+  // half of the relative 3*pi twist, with opposing signs around the X axis.
+  struct alignas(16) TwistBoundaryParams {
+    glm::vec4 leftPivotAngle{0.0f};
+    glm::vec4 rightPivotAngle{0.0f};
+    // x is set when the prescribed 3*pi rotation has finished.  The twist
+    // shader then turns every particle into a fixed point in the same substep.
+    glm::vec4 control{0.0f};
+  };
+
   static_assert(sizeof(ElementInfo) == 80,
                 "ElementInfo must match std430 ElementInfo in the shaders");
   static_assert(sizeof(EdgeInfo) == 32,
                 "EdgeInfo must match std430 EdgeInfo in the shaders");
   static_assert(sizeof(SimulationParams) == 48,
                 "SimulationParams must match the std140 parameter block");
+  static_assert(sizeof(TwistBoundaryParams) == 48,
+                "TwistBoundaryParams must match the twist shader");
 #if defined(XPBD_RID_SWITCH_DEMO)
   static_assert(sizeof(RidElementInfo) == 128,
                 "RidElementInfo must match riddfmb3d's std430 layout");
@@ -206,6 +221,15 @@ public:
     vks::Buffer volumeCorrectionIndices;
   } compute;
 
+  struct TwistBoundaryCompute {
+    VkDescriptorSetLayout descriptorSetLayout{VK_NULL_HANDLE};
+    VkDescriptorSet descriptorSet{VK_NULL_HANDLE};
+    VkPipelineLayout pipelineLayout{VK_NULL_HANDLE};
+    VkPipeline pipeline{VK_NULL_HANDLE};
+    vks::Buffer restPositions;
+    vks::Buffer endpointKinds;
+  } twistBoundary;
+
 #if defined(XPBD_RID_SWITCH_DEMO)
   struct RidCompute {
     VkDescriptorSetLayout descriptorSetLayout{VK_NULL_HANDLE};
@@ -270,6 +294,13 @@ public:
     vkDestroyPipelineLayout(device, compute.pipelineLayout, nullptr);
     vkDestroyDescriptorSetLayout(device, compute.descriptorSetLayout, nullptr);
     vkDestroyCommandPool(device, compute.commandPool, nullptr);
+
+    twistBoundary.restPositions.destroy();
+    twistBoundary.endpointKinds.destroy();
+    vkDestroyPipeline(device, twistBoundary.pipeline, nullptr);
+    vkDestroyPipelineLayout(device, twistBoundary.pipelineLayout, nullptr);
+    vkDestroyDescriptorSetLayout(device, twistBoundary.descriptorSetLayout,
+                                 nullptr);
 #if defined(XPBD_RID_SWITCH_DEMO)
     ridCompute.parameters.destroy();
     ridCompute.lambdas.destroy();
@@ -289,7 +320,7 @@ public:
     VulkanExampleBase::prepare();
     comparison_time_stepping::Configuration jsonConfig{
         config.substeps, config.youngsModulus, config.poissonRatio,
-        config.gravityMagnitude};
+        config.gravityMagnitude, config.scene};
     comparison_time_stepping::loadConfiguration(
         getAssetPath() + comparison_time_stepping::kConfigAssetPath,
         jsonConfig);
@@ -297,6 +328,13 @@ public:
     config.youngsModulus = jsonConfig.youngsModulus;
     config.poissonRatio = jsonConfig.poissonRatio;
     config.gravityMagnitude = jsonConfig.gravityMagnitude;
+    config.scene = jsonConfig.scene;
+    config.modelPath = isBunnySquashScene()
+                           ? "models/bunny_3828_asc.vtk"
+                           : "models/beam3d.vtk";
+    // Let the fully flattened bunny be inspected before its first elastic
+    // solve.  Other scenes retain their normal automatic start behavior.
+    paused = isBunnySquashScene();
     loadMeshAndBuildJacobiTopology();
 #if defined(XPBD_RID_SWITCH_DEMO)
     buildRidTopology();
@@ -305,6 +343,7 @@ public:
     prepareDescriptorPool();
     prepareGraphics();
     prepareCompute();
+    prepareTwistBoundaryCompute();
 #if defined(XPBD_RID_SWITCH_DEMO)
     prepareRidCompute();
 #endif
@@ -335,6 +374,7 @@ public:
       // Compute and graphics use the same queue. Queue order, plus the final
       // compute-to-vertex barrier, makes the simulation state visible to draw.
       VK_CHECK_RESULT(vkQueueSubmit(queue, 1, &computeSubmit, VK_NULL_HANDLE));
+      simulationTime += kSimulationFrameDeltaT;
     }
 
     updateGraphicsUniform();
@@ -356,6 +396,15 @@ public:
 #endif
     ImGui::Text("%u edges, %u tetrahedra", static_cast<uint32_t>(edges.size()),
                 static_cast<uint32_t>(elements.size()));
+    if (isTwistScene()) {
+      ImGui::TextUnformatted(
+          "Scene: beam twist 3pi (opposing X-end rotations)");
+    } else if (isBunnySquashScene()) {
+      ImGui::TextUnformatted(
+          "Scene: bunny squash (initial current positions have z = 0)");
+    } else {
+      ImGui::TextUnformatted("Scene: cantilever beam (left X slab fixed)");
+    }
     ImGui::Text("Fixed time: 1/60 s per frame, %u substeps (JSON)",
                 simulationSubsteps());
 
@@ -364,11 +413,13 @@ public:
                                   1.0e5f, 1.0e8f, "%.0f");
     changed |= ImGui::SliderFloat("Poisson ratio (Pr)", &config.poissonRatio,
                                   0.30f, 0.49f, "%.3f");
-    changed |= ImGui::SliderFloat("Gravity (downward)",
-                                  &config.gravityMagnitude, 0.0f, 50.0f,
-                                  "%.2f");
+    changed |= ImGui::SliderFloat(
+        "Gravity (downward)", &config.gravityMagnitude, 0.0f, 50.0f, "%.2f");
     if (changed) {
       resetRequested = true;
+    }
+    if (ImGui::Button(paused ? "Resume simulation" : "Pause simulation")) {
+      paused = !paused;
     }
     if (ImGui::Button("Reset simulation")) {
       resetRequested = true;
@@ -383,10 +434,14 @@ private:
   std::vector<EdgeInfo> edges;
   std::vector<float> massesInv;
   std::vector<int32_t> fixedPoints;
+  std::vector<int32_t> twistEndpointKinds;
   std::vector<int32_t> edgeOffsets;
   std::vector<int32_t> edgeCorrectionIndices;
   std::vector<int32_t> volumeOffsets;
   std::vector<int32_t> volumeCorrectionIndices;
+  glm::vec3 twistLeftPivot{0.0f};
+  glm::vec3 twistRightPivot{0.0f};
+  float simulationTime{0.0f};
 #if defined(XPBD_RID_SWITCH_DEMO)
   int selectedSolver{0}; // 0 = Jacobi, 1 = RID
   std::vector<RidElementInfo> ridElements;
@@ -396,6 +451,10 @@ private:
 #endif
 
   uint32_t simulationSubsteps() const { return std::max(1u, config.substeps); }
+
+  bool isTwistScene() const { return config.scene == "beam_twist_3pi"; }
+
+  bool isBunnySquashScene() const { return config.scene == "bunny_squash"; }
 
   float simulationSubstepDeltaT() const {
     return kSimulationFrameDeltaT / static_cast<float>(simulationSubsteps());
@@ -517,11 +576,49 @@ private:
       xMin = std::min(xMin, x);
       xMax = std::max(xMax, x);
     }
-    const float fixedEnd = xMin + std::max((xMax - xMin) * 0.08f, 1.0e-4f);
     fixedPoints.assign(particleCount, 0);
-    for (uint32_t particle = 0; particle < particleCount; ++particle) {
-      fixedPoints[particle] = mesh.vertices(particle, 0) <= fixedEnd ? 1 : 0;
+    twistEndpointKinds.assign(particleCount, 0);
+    if (isBunnySquashScene()) {
+      // The squash test is released from a fully flat current configuration.
+      // It has no kinematic supports, so the elastic constraints alone drive
+      // the bunny back toward its 3D rest shape.
+      return;
     }
+    if (!isTwistScene()) {
+      const float fixedEnd = xMin + std::max((xMax - xMin) * 0.08f, 1.0e-4f);
+      for (uint32_t particle = 0; particle < particleCount; ++particle) {
+        fixedPoints[particle] = mesh.vertices(particle, 0) <= fixedEnd ? 1 : 0;
+      }
+      return;
+    }
+
+    // Exact endpoint slabs from vksim's frozen beam-3pi case.  beam3d.vtk
+    // spans x=[0,6], so each selector contains one 6x6 endpoint section.
+    constexpr float kEndpointThickness = 0.01f;
+    glm::vec3 leftSum(0.0f);
+    glm::vec3 rightSum(0.0f);
+    uint32_t leftCount = 0;
+    uint32_t rightCount = 0;
+    for (uint32_t particle = 0; particle < particleCount; ++particle) {
+      const glm::vec3 position = positionAt(static_cast<int32_t>(particle));
+      if (position.x <= xMin + kEndpointThickness + kEpsilon) {
+        twistEndpointKinds[particle] = 1;
+        fixedPoints[particle] = 1;
+        leftSum += position;
+        ++leftCount;
+      } else if (position.x >= xMax - kEndpointThickness - kEpsilon) {
+        twistEndpointKinds[particle] = 2;
+        fixedPoints[particle] = 1;
+        rightSum += position;
+        ++rightCount;
+      }
+    }
+    if (leftCount == 0 || rightCount == 0) {
+      throw std::runtime_error(
+          "beam_twist_3pi requires particles at both beam endpoints");
+    }
+    twistLeftPivot = leftSum / static_cast<float>(leftCount);
+    twistRightPivot = rightSum / static_cast<float>(rightCount);
   }
 
 #if defined(XPBD_RID_SWITCH_DEMO)
@@ -543,10 +640,9 @@ private:
       element.restShape = glm::mat3x4(glm::vec4(restShape[0], 0.0f),
                                       glm::vec4(restShape[1], 0.0f),
                                       glm::vec4(restShape[2], 0.0f));
-      element.restShapeInv =
-          glm::mat3x4(glm::vec4(restShapeInv[0], 0.0f),
-                      glm::vec4(restShapeInv[1], 0.0f),
-                      glm::vec4(restShapeInv[2], 0.0f));
+      element.restShapeInv = glm::mat3x4(glm::vec4(restShapeInv[0], 0.0f),
+                                         glm::vec4(restShapeInv[1], 0.0f),
+                                         glm::vec4(restShapeInv[2], 0.0f));
       ridElements.push_back(element);
     }
 
@@ -637,7 +733,13 @@ private:
     initialParticles.resize(particleCount);
     for (uint32_t particle = 0; particle < particleCount; ++particle) {
       Particle value{};
-      value.pos = glm::vec4(positionAt(static_cast<int32_t>(particle)), 1.0f);
+      glm::vec3 initialPosition = positionAt(static_cast<int32_t>(particle));
+      if (isBunnySquashScene()) {
+        // Keep all rest data from the 3D VTK mesh, but start the dynamic
+        // configuration completely flattened onto the z = 0 plane.
+        initialPosition.z = 0.0f;
+      }
+      value.pos = glm::vec4(initialPosition, 1.0f);
       value.vel = glm::vec4(0.0f);
       value.uv = glm::vec4(0.0f);
       value.normal = glm::vec4(0.0f);
@@ -647,11 +749,14 @@ private:
       const uint32_t a = static_cast<uint32_t>(mesh.tris(tri, 0));
       const uint32_t b = static_cast<uint32_t>(mesh.tris(tri, 1));
       const uint32_t c = static_cast<uint32_t>(mesh.tris(tri, 2));
+      // Normals describe the 3D rest surface.  In bunny_squash the current
+      // positions are coplanar initially, so deriving normals from them would
+      // lose the surface orientation before the elastic recovery starts.
       const glm::vec3 normal =
-          glm::cross(glm::vec3(initialParticles[b].pos) -
-                         glm::vec3(initialParticles[a].pos),
-                     glm::vec3(initialParticles[c].pos) -
-                         glm::vec3(initialParticles[a].pos));
+          glm::cross(positionAt(static_cast<int32_t>(b)) -
+                         positionAt(static_cast<int32_t>(a)),
+                     positionAt(static_cast<int32_t>(c)) -
+                         positionAt(static_cast<int32_t>(a)));
       initialParticles[a].normal += glm::vec4(normal, 0.0f);
       initialParticles[b].normal += glm::vec4(normal, 0.0f);
       initialParticles[c].normal += glm::vec4(normal, 0.0f);
@@ -687,6 +792,16 @@ private:
     uploadDeviceLocalBuffer(
         compute.fixedPoints, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         fixedPoints.data(), fixedPoints.size() * sizeof(int32_t));
+    std::vector<glm::vec4> restPositions(particleCount);
+    for (uint32_t particle = 0; particle < particleCount; ++particle) {
+      restPositions[particle] = initialParticles[particle].pos;
+    }
+    uploadDeviceLocalBuffer(
+        twistBoundary.restPositions, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        restPositions.data(), restPositions.size() * sizeof(glm::vec4));
+    uploadDeviceLocalBuffer(
+        twistBoundary.endpointKinds, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        twistEndpointKinds.data(), twistEndpointKinds.size() * sizeof(int32_t));
     uploadDeviceLocalBuffer(compute.elements,
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, elements.data(),
                             elements.size() * sizeof(ElementInfo));
@@ -711,22 +826,18 @@ private:
     createDeviceLocalStorage(compute.volumeCorrections,
                              elements.size() * 4 * sizeof(glm::vec4));
 #if defined(XPBD_RID_SWITCH_DEMO)
-    uploadDeviceLocalBuffer(ridCompute.lambdas,
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                            ridLambdas.data(),
-                            ridLambdas.size() * sizeof(float));
-    uploadDeviceLocalBuffer(ridCompute.elements,
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                            ridElements.data(),
-                            ridElements.size() * sizeof(RidElementInfo));
-    uploadDeviceLocalBuffer(ridCompute.parallelSlots,
-                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                            ridParallelSlots.data(),
-                            ridParallelSlots.size() * sizeof(int32_t));
+    uploadDeviceLocalBuffer(
+        ridCompute.lambdas, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        ridLambdas.data(), ridLambdas.size() * sizeof(float));
+    uploadDeviceLocalBuffer(
+        ridCompute.elements, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        ridElements.data(), ridElements.size() * sizeof(RidElementInfo));
+    uploadDeviceLocalBuffer(
+        ridCompute.parallelSlots, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        ridParallelSlots.data(), ridParallelSlots.size() * sizeof(int32_t));
     uploadDeviceLocalBuffer(ridCompute.masses,
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                            ridMasses.data(),
-                            ridMasses.size() * sizeof(float));
+                            ridMasses.data(), ridMasses.size() * sizeof(float));
 #endif
   }
 
@@ -740,18 +851,18 @@ private:
                                                   1),
 #endif
         vks::initializers::descriptorPoolSize(VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                              12
+                                              15
 #if defined(XPBD_RID_SWITCH_DEMO)
                                                   + 6
 #endif
-                                                  )};
+                                              )};
     const VkDescriptorPoolCreateInfo poolInfo =
         vks::initializers::descriptorPoolCreateInfo(poolSizes,
                                                     maxConcurrentFrames +
 #if defined(XPBD_RID_SWITCH_DEMO)
-                                                        2);
+                                                        3);
 #else
-                                                        1);
+                                                        2);
 #endif
     VK_CHECK_RESULT(
         vkCreateDescriptorPool(device, &poolInfo, nullptr, &descriptorPool));
@@ -940,6 +1051,63 @@ private:
                                              compute.commandBuffers.data()));
   }
 
+  void prepareTwistBoundaryCompute() {
+    const std::vector<VkDescriptorSetLayoutBinding> bindings = {
+        vks::initializers::descriptorSetLayoutBinding(
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 0),
+        vks::initializers::descriptorSetLayoutBinding(
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 1),
+        vks::initializers::descriptorSetLayoutBinding(
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 2),
+        vks::initializers::descriptorSetLayoutBinding(
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 3)};
+    const VkDescriptorSetLayoutCreateInfo layoutInfo =
+        vks::initializers::descriptorSetLayoutCreateInfo(bindings);
+    VK_CHECK_RESULT(vkCreateDescriptorSetLayout(
+        device, &layoutInfo, nullptr, &twistBoundary.descriptorSetLayout));
+
+    const VkPushConstantRange pushRange = vks::initializers::pushConstantRange(
+        VK_SHADER_STAGE_COMPUTE_BIT, sizeof(TwistBoundaryParams), 0);
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo =
+        vks::initializers::pipelineLayoutCreateInfo(
+            &twistBoundary.descriptorSetLayout, 1);
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    VK_CHECK_RESULT(vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr,
+                                           &twistBoundary.pipelineLayout));
+
+    const VkDescriptorSetAllocateInfo allocateInfo =
+        vks::initializers::descriptorSetAllocateInfo(
+            descriptorPool, &twistBoundary.descriptorSetLayout, 1);
+    VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocateInfo,
+                                             &twistBoundary.descriptorSet));
+    const std::array<VkWriteDescriptorSet, 4> writes = {
+        vks::initializers::writeDescriptorSet(twistBoundary.descriptorSet,
+                                              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                              0, &storage.particles.descriptor),
+        vks::initializers::writeDescriptorSet(
+            twistBoundary.descriptorSet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+            &twistBoundary.restPositions.descriptor),
+        vks::initializers::writeDescriptorSet(
+            twistBoundary.descriptorSet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2,
+            &twistBoundary.endpointKinds.descriptor),
+        vks::initializers::writeDescriptorSet(
+            twistBoundary.descriptorSet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3,
+            &compute.fixedPoints.descriptor)};
+    vkUpdateDescriptorSets(device, static_cast<uint32_t>(writes.size()),
+                           writes.data(), 0, nullptr);
+
+    VkComputePipelineCreateInfo pipelineInfo =
+        vks::initializers::computePipelineCreateInfo(
+            twistBoundary.pipelineLayout, 0);
+    pipelineInfo.stage =
+        loadShader(getShadersPath() + "xpbdjacobi3d/twist_boundary.comp.spv",
+                   VK_SHADER_STAGE_COMPUTE_BIT);
+    VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1,
+                                             &pipelineInfo, nullptr,
+                                             &twistBoundary.pipeline));
+  }
+
   void updateSimulationParams() {
     const glm::vec4 lame =
         lameFromYoungsAndPoisson(config.youngsModulus, config.poissonRatio);
@@ -948,8 +1116,7 @@ private:
     params.relaxation = 1.0f;
     params.lameLambda = lame.x;
     params.lameMu = lame.y;
-    params.gravity =
-        glm::vec4(0.0f, -config.gravityMagnitude, 0.0f, 0.0f);
+    params.gravity = glm::vec4(0.0f, -config.gravityMagnitude, 0.0f, 0.0f);
     params.damping = config.damping;
     params.particleCount = static_cast<uint32_t>(initialParticles.size());
     params.edgeCount = static_cast<uint32_t>(edges.size());
@@ -996,8 +1163,8 @@ private:
             VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_COMPUTE_BIT, 8)};
     const VkDescriptorSetLayoutCreateInfo layoutInfo =
         vks::initializers::descriptorSetLayoutCreateInfo(bindings);
-    VK_CHECK_RESULT(vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr,
-                                                &ridCompute.descriptorSetLayout));
+    VK_CHECK_RESULT(vkCreateDescriptorSetLayout(
+        device, &layoutInfo, nullptr, &ridCompute.descriptorSetLayout));
     VkPushConstantRange pushRange = vks::initializers::pushConstantRange(
         VK_SHADER_STAGE_COMPUTE_BIT, sizeof(uint32_t), 0);
     VkPipelineLayoutCreateInfo pipelineLayoutInfo =
@@ -1013,9 +1180,9 @@ private:
     VK_CHECK_RESULT(vkAllocateDescriptorSets(device, &allocateInfo,
                                              &ridCompute.descriptorSet));
     const std::array<VkWriteDescriptorSet, 7> writes = {
-        vks::initializers::writeDescriptorSet(
-            ridCompute.descriptorSet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 0,
-            &storage.particles.descriptor),
+        vks::initializers::writeDescriptorSet(ridCompute.descriptorSet,
+                                              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                              0, &storage.particles.descriptor),
         vks::initializers::writeDescriptorSet(
             ridCompute.descriptorSet, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2,
             &ridCompute.parameters.descriptor),
@@ -1028,9 +1195,9 @@ private:
         vks::initializers::writeDescriptorSet(
             ridCompute.descriptorSet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5,
             &ridCompute.parallelSlots.descriptor),
-        vks::initializers::writeDescriptorSet(
-            ridCompute.descriptorSet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6,
-            &ridCompute.masses.descriptor),
+        vks::initializers::writeDescriptorSet(ridCompute.descriptorSet,
+                                              VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                              6, &ridCompute.masses.descriptor),
         vks::initializers::writeDescriptorSet(
             ridCompute.descriptorSet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8,
             &compute.fixedPoints.descriptor)};
@@ -1039,13 +1206,12 @@ private:
 
     VkComputePipelineCreateInfo pipelineInfo =
         vks::initializers::computePipelineCreateInfo(ridCompute.pipelineLayout,
-                                                      0);
+                                                     0);
     const auto makePipeline = [&](const char *name, VkPipeline &pipeline) {
       pipelineInfo.stage = loadShader(getShadersPath() + "riddfmb3d/" + name,
                                       VK_SHADER_STAGE_COMPUTE_BIT);
-      VK_CHECK_RESULT(vkCreateComputePipelines(device, pipelineCache, 1,
-                                               &pipelineInfo, nullptr,
-                                               &pipeline));
+      VK_CHECK_RESULT(vkCreateComputePipelines(
+          device, pipelineCache, 1, &pipelineInfo, nullptr, &pipeline));
     };
     makePipeline("rid_begin.comp.spv", ridCompute.begin);
     makePipeline("rid_solve.comp.spv", ridCompute.solve);
@@ -1102,6 +1268,12 @@ private:
     const uint32_t elementGroups =
         dispatchCount(static_cast<uint32_t>(elements.size()));
     for (uint32_t substep = 0; substep < substeps; ++substep) {
+      applyTwistBoundary(commandBuffer,
+                         simulationTime + static_cast<float>(substep + 1) *
+                                              simulationSubstepDeltaT());
+      vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                              compute.pipelineLayout, 0, 1,
+                              &compute.descriptorSet, 0, nullptr);
       vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                         compute.pipelines.begin);
       vkCmdDispatch(commandBuffer, particleGroups, 1, 1);
@@ -1151,6 +1323,32 @@ private:
     VK_CHECK_RESULT(vkEndCommandBuffer(commandBuffer));
   }
 
+  void applyTwistBoundary(VkCommandBuffer commandBuffer, float time) const {
+    if (!isTwistScene()) {
+      return;
+    }
+
+    constexpr float kEndpointAngle = 4.71238898038469f; // 3*pi/2
+    constexpr float kDriveTime = 2.356194490192345f;    // 3*pi/4 at 2 rad/s
+    const float alpha = glm::clamp(time / kDriveTime, 0.0f, 1.0f);
+    const TwistBoundaryParams params{
+        glm::vec4(twistLeftPivot, alpha * kEndpointAngle),
+        glm::vec4(twistRightPivot, -alpha * kEndpointAngle),
+        glm::vec4(time >= kDriveTime ? 1.0f : 0.0f)};
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                      twistBoundary.pipeline);
+    vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            twistBoundary.pipelineLayout, 0, 1,
+                            &twistBoundary.descriptorSet, 0, nullptr);
+    vkCmdPushConstants(commandBuffer, twistBoundary.pipelineLayout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                       sizeof(TwistBoundaryParams), &params);
+    vkCmdDispatch(commandBuffer,
+                  dispatchCount(static_cast<uint32_t>(initialParticles.size())),
+                  1, 1);
+    addComputeBarrier(commandBuffer);
+  }
+
 #if defined(XPBD_RID_SWITCH_DEMO)
   void buildRidComputeCommandBuffer(uint32_t substeps) {
     VkCommandBuffer commandBuffer = compute.commandBuffers[currentBuffer];
@@ -1168,8 +1366,8 @@ private:
     graphicsReadBarrier.buffer = storage.particles.buffer;
     graphicsReadBarrier.size = VK_WHOLE_SIZE;
     vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
-                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
-                         1, &graphicsReadBarrier, 0, nullptr);
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 1,
+                         &graphicsReadBarrier, 0, nullptr);
 
     vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                             ridCompute.pipelineLayout, 0, 1,
@@ -1182,6 +1380,12 @@ private:
     const uint32_t colorCount =
         static_cast<uint32_t>(ridParallelSlots.size() - 1);
     for (uint32_t substep = 0; substep < substeps; ++substep) {
+      applyTwistBoundary(commandBuffer,
+                         simulationTime + static_cast<float>(substep + 1) *
+                                              simulationSubstepDeltaT());
+      vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                              ridCompute.pipelineLayout, 0, 1,
+                              &ridCompute.descriptorSet, 0, nullptr);
       vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                         ridCompute.begin);
       vkCmdDispatch(commandBuffer, beginGroups, 1, 1);
@@ -1192,8 +1396,8 @@ private:
                           ridCompute.solve);
         for (uint32_t color = 0; color < colorCount; ++color) {
           vkCmdPushConstants(commandBuffer, ridCompute.pipelineLayout,
-                             VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                             sizeof(uint32_t), &color);
+                             VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t),
+                             &color);
           const uint32_t start = static_cast<uint32_t>(ridParallelSlots[color]);
           const uint32_t end =
               static_cast<uint32_t>(ridParallelSlots[color + 1]);
@@ -1275,6 +1479,11 @@ private:
 
   void resetParticleState() {
     vkDeviceWaitIdle(device);
+    simulationTime = 0.0f;
+    // Reset returns bunny_squash to its inspectable flattened initial state.
+    if (isBunnySquashScene()) {
+      paused = true;
+    }
     vks::Buffer staging;
     const VkDeviceSize size = initialParticles.size() * sizeof(Particle);
     vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -1302,6 +1511,30 @@ private:
                          0, 0, nullptr, 1, &copyBarrier, 0, nullptr);
     vulkanDevice->flushCommandBuffer(commandBuffer, queue, true);
     staging.destroy();
+
+    // A finished twist promotes every particle to a fixed point on the GPU.
+    // Reset restores the scene's original endpoint-only fixed-point mask.
+    vks::Buffer fixedPointsStaging;
+    const VkDeviceSize fixedPointsSize =
+        fixedPoints.size() * sizeof(fixedPoints.front());
+    vulkanDevice->createBuffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                   VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                               &fixedPointsStaging, fixedPointsSize,
+                               fixedPoints.data());
+    commandBuffer = vulkanDevice->createCommandBuffer(
+        VK_COMMAND_BUFFER_LEVEL_PRIMARY, true);
+    const VkBufferCopy fixedPointsCopy{0, 0, fixedPointsSize};
+    vkCmdCopyBuffer(commandBuffer, fixedPointsStaging.buffer,
+                    compute.fixedPoints.buffer, 1, &fixedPointsCopy);
+    copyBarrier.buffer = compute.fixedPoints.buffer;
+    copyBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr,
+                         1, &copyBarrier, 0, nullptr);
+    vulkanDevice->flushCommandBuffer(commandBuffer, queue, true);
+    fixedPointsStaging.destroy();
   }
 };
 

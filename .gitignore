@@ -247,4 +247,3 @@ __pycache__**
 
 external/glm/*
 !external/.gitkeep
-assets/*

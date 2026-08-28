@@ -1,0 +1,7 @@
+{
+  "substepsPerFrame": 30,
+  "youngsModulus": 1.0e7,
+  "poissonRatio": 0.40,
+  "gravity": 0.0,
+  "scene": "cantilever"
+}

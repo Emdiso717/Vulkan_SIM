@@ -1,0 +1,61 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+struct Particle {
+  vec4 pos;
+  vec4 vel;
+  vec4 uv;
+  vec4 normal;
+};
+
+layout(std430, binding = 0) buffer Particles { Particle particles[]; };
+layout(std430, binding = 1) readonly buffer RestPositions {
+  vec4 restPositions[];
+};
+// 0 = free particle, 1 = left endpoint, 2 = right endpoint.
+layout(std430, binding = 2) readonly buffer EndpointKinds {
+  int endpointKinds[];
+};
+layout(std430, binding = 3) buffer FixedPoints { int fixedPoints[]; };
+
+layout(push_constant) uniform TwistParams {
+  vec4 leftPivotAngle;
+  vec4 rightPivotAngle;
+  // x is 1 when the prescribed rotation has completed.
+  vec4 control;
+} params;
+
+vec3 rotateAroundX(vec3 relative, float angle) {
+  const float c = cos(angle);
+  const float s = sin(angle);
+  return vec3(relative.x, c * relative.y - s * relative.z,
+              s * relative.y + c * relative.z);
+}
+
+void main() {
+  const uint particle = gl_GlobalInvocationID.x;
+  if (particle >= particles.length()) {
+    return;
+  }
+
+  const int endpoint = endpointKinds[particle];
+  if (endpoint != 0) {
+    const vec4 pivotAngle =
+        endpoint == 1 ? params.leftPivotAngle : params.rightPivotAngle;
+    const vec3 pivot = pivotAngle.xyz;
+    const vec3 relative = restPositions[particle].xyz - pivot;
+    particles[particle].pos.xyz =
+        pivot + rotateAroundX(relative, pivotAngle.w);
+    // The prescribed boundary is kinematic; begin/end solve retain the target
+    // position and give it zero dynamic velocity, matching the vksim protocol.
+    particles[particle].vel = vec4(0.0);
+  }
+
+  // Keep the final prescribed endpoint pose, then freeze the entire beam at
+  // the end of the loading phase.  Subsequent Jacobi/RID passes read this
+  // same buffer and therefore leave every particle unchanged.
+  if (params.control.x > 0.5) {
+    fixedPoints[particle] = 1;
+  }
+}
