@@ -12,7 +12,7 @@ tasks.whenTaskAdded { task ->
     if (task.name == "packageRelease" || task.name == "packageDebug") {
         task.doFirst {
             def apkName = task.project.name + (task.name.contains("Release") ? "-release.apk" : "-debug.apk")
-            def binDir = task.project.file("../../bin")
+            def binDir = task.project.file("../bin")
             def f = new File(binDir, apkName)
             if (f.exists()) f.delete()
         }

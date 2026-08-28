@@ -1,15 +1,16 @@
 #pragma once
 
 // Shared fixed-rate time-stepping configuration for the solver-comparison
-// samples.  The JSON configuration has four required fields and one optional
-// scene selector:
+// samples.  The JSON configuration has four required fields plus optional
+// scene and initial-solver selectors:
 //
 // {
 //   "substepsPerFrame": 20,
 //   "youngsModulus": 1.0e6,
 //   "poissonRatio": 0.40,
 //   "gravity": 9.8,
-//   "scene": "cantilever"
+//   "scene": "cantilever",
+//   "solver": "rid"
 // }
 
 #include <cmath>
@@ -40,6 +41,9 @@ struct Configuration {
   float gravityMagnitude{9.8f};
   // Supported values: "cantilever", "beam_twist_3pi", and "bunny_squash".
   std::string scene{"cantilever"};
+  // The selectable XPBD/RID sample uses this as its initial backend. Other
+  // samples intentionally ignore it. Supported values: "jacobi" and "rid".
+  std::string solver{"jacobi"};
 };
 
 inline bool readTextResource(const std::string &path, std::string &contents) {
@@ -151,6 +155,21 @@ inline bool loadConfiguration(const std::string &path, Configuration &config) {
       return false;
     }
   }
+  const auto solverIt = document.find("solver");
+  if (solverIt != document.end()) {
+    if (!solverIt->is_string()) {
+      std::cerr << "comparison time stepping: solver in '" << path
+                << "' must be a string; using built-in comparison parameters\n";
+      return false;
+    }
+    parsed.solver = solverIt->get<std::string>();
+    if (parsed.solver != "jacobi" && parsed.solver != "rid") {
+      std::cerr << "comparison time stepping: solver in '" << path
+                << "' must be jacobi or rid; using built-in comparison "
+                   "parameters\n";
+      return false;
+    }
+  }
   if (!std::isfinite(parsed.youngsModulus) ||
       parsed.youngsModulus < 1.0e5f || parsed.youngsModulus > 1.0e8f ||
       !std::isfinite(parsed.poissonRatio) || parsed.poissonRatio < 0.30f ||
@@ -171,7 +190,8 @@ inline bool loadConfiguration(const std::string &path, Configuration &config) {
             << ", E=" << config.youngsModulus
             << ", Pr=" << config.poissonRatio
             << ", gravity=(0, -" << config.gravityMagnitude << ", 0)"
-            << ", scene=" << config.scene << "\n";
+            << ", scene=" << config.scene << ", solver=" << config.solver
+            << "\n";
   return true;
 }
 

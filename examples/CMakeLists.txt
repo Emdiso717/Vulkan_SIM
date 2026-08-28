@@ -87,18 +87,8 @@ function(buildExamples)
 endfunction(buildExamples)
 
 set(EXAMPLES
-	# xpbdcloth
-	# ridcloth
-	# xpbddfmb2d
-	# riddfmb2d
-	# Legacy standalone sources are retained, but the comparison build exposes
-	# only the two measured solvers and the selectable demonstration.
-	# xpbddfmb3d
-	xpbdjacobi3d
-	riddfmb3d
-	ridbeam3d
+	# The comparison sample owns both backends and is the only exposed example.
 	xpbdvsrid3d
-	# computecloth
 )
 
 buildExamples()

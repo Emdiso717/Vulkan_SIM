@@ -1,9 +1,5 @@
-file('examples').eachDir { sub ->
-    if (sub.name != '_template') {
-        if (file("examples/$sub.name/build.gradle").exists()) {
-            println("Adding project $sub.name")
-            include ":$sub.name"
-            project(":$sub.name").projectDir = new File("examples/$sub.name")
-        }
-    }
-}
+// Expose a single Android application containing both the Jacobi XPBD and
+// RID backends. The other example folders remain as implementation history
+// but are deliberately not Gradle modules.
+include ':xpbdvsrid3d'
+project(':xpbdvsrid3d').projectDir = new File('examples/xpbdvsrid3d')

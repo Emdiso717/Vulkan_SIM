@@ -62,7 +62,6 @@ task copyTask {
     copy {
         from rootProject.ext.assetPath + 'models'
         into 'assets/models'
-        include 'beam3d.vtk'
     }
 
     copy {
