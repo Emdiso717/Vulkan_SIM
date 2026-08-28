@@ -34,9 +34,9 @@ inline void addBufferBarriers(
     barriers.push_back(barrier);
   }
 
-  vkCmdPipelineBarrier(commandBuffer, srcStageMask, dstStageMask, 0,
-                       0, nullptr, static_cast<uint32_t>(barriers.size()),
-                       barriers.data(), 0, nullptr);
+  vkCmdPipelineBarrier(commandBuffer, srcStageMask, dstStageMask, 0, 0, nullptr,
+                       static_cast<uint32_t>(barriers.size()), barriers.data(),
+                       0, nullptr);
 }
 
 inline void addGraphicsToComputeBarriers(
@@ -53,8 +53,9 @@ inline void addGraphicsToComputeBarriers(
                     computeQueueFamily);
 }
 
-inline void addComputeToComputeBarriers(
-    VkCommandBuffer commandBuffer, std::initializer_list<VkBuffer> buffers) {
+inline void
+addComputeToComputeBarriers(VkCommandBuffer commandBuffer,
+                            std::initializer_list<VkBuffer> buffers) {
   addBufferBarriers(commandBuffer, buffers, VK_ACCESS_SHADER_WRITE_BIT,
                     VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
@@ -75,4 +76,4 @@ inline void addComputeToGraphicsBarriers(
                     graphicsQueueFamily);
 }
 
-}  // namespace example_barriers
+} // namespace example_barriers

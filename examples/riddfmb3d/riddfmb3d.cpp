@@ -1,10 +1,10 @@
 
-#include "../config.hpp"
-#include "../vulkan_barriers.hpp"
 #include "VulkanglTFModel.h"
+#include "config.hpp"
 #include "glm/fwd.hpp"
 #include "glm/gtc/type_ptr.hpp"
 #include "vtkio.hpp"
+#include "vulkan_barriers.hpp"
 #include "vulkanexamplebase.h"
 #include <algorithm>
 #include <cmath>
@@ -362,8 +362,7 @@ public:
     example_barriers::addGraphicsToComputeBarriers(
         copyCmd,
         {compute.elementInfoBuffer.buffer, compute.lambdaBuffer.buffer,
-         compute.massesBuffer.buffer,
-         compute.fixedpointBuffer.buffer,
+         compute.massesBuffer.buffer, compute.fixedpointBuffer.buffer,
          compute.elemParallelSlotsBuffer.buffer},
         dedicatedComputeQueue, vulkanDevice->queueFamilyIndices.graphics,
         vulkanDevice->queueFamilyIndices.compute, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -879,15 +878,15 @@ public:
     example_config::loadRiddfmb3dConfiguration(args, config);
     writeVtk = example_config::hasCommandLineFlag(args, "--write-vtk");
     if (writeVtk) {
-      const std::string outputDirectory = example_config::getCommandLineOption(
-          args, "--vtk-output-dir");
+      const std::string outputDirectory =
+          example_config::getCommandLineOption(args, "--vtk-output-dir");
       if (!outputDirectory.empty()) {
         vtkOutputDirectory = outputDirectory;
       }
       std::filesystem::create_directories(vtkOutputDirectory);
 
-      const std::string frameLimit = example_config::getCommandLineOption(
-          args, "--vtk-frame-limit");
+      const std::string frameLimit =
+          example_config::getCommandLineOption(args, "--vtk-frame-limit");
       if (!frameLimit.empty()) {
         uint32_t parsedFrameLimit = 0;
         if (example_config::parseUint32(frameLimit, parsedFrameLimit) &&
@@ -1022,8 +1021,7 @@ public:
       example_barriers::addGraphicsToComputeBarriers(
           cmdBuffer,
           {compute.elementInfoBuffer.buffer, compute.lambdaBuffer.buffer,
-           compute.massesBuffer.buffer,
-           compute.fixedpointBuffer.buffer,
+           compute.massesBuffer.buffer, compute.fixedpointBuffer.buffer,
            compute.elemParallelSlotsBuffer.buffer},
           dedicatedComputeQueue, vulkanDevice->queueFamilyIndices.graphics,
           vulkanDevice->queueFamilyIndices.compute, 0,
@@ -1053,8 +1051,7 @@ public:
                             &compute.descriptorSets[0], 0, 0);
 
     const uint32_t numParticles = static_cast<uint32_t>(beam3d.V.rows());
-    const uint32_t numLambda =
-        static_cast<uint32_t>(compute.lambdaData.size());
+    const uint32_t numLambda = static_cast<uint32_t>(compute.lambdaData.size());
     const uint32_t workgroupSizeX = 64;
     const uint32_t numWorkgroupsX =
         (std::max(numParticles, numLambda) + workgroupSizeX - 1) /
@@ -1102,8 +1099,8 @@ public:
 
           if (setIdx < numParallelSets - 1) {
             example_barriers::addComputeToComputeBarriers(
-                cmdBuffer, {storageBuffers.particles.buffer,
-                            compute.lambdaBuffer.buffer});
+                cmdBuffer,
+                {storageBuffers.particles.buffer, compute.lambdaBuffer.buffer});
           }
         }
         example_barriers::addComputeToComputeBarriers(
@@ -1241,7 +1238,8 @@ public:
 
   void writeRestMesh() const {
     std::filesystem::create_directories(vtkOutputDirectory);
-    const std::filesystem::path outputPath = vtkOutputDirectory / "RIDdfmb_0.vtk";
+    const std::filesystem::path outputPath =
+        vtkOutputDirectory / "RIDdfmb_0.vtk";
     VtkOutput vtkoutput(outputPath);
     vtkoutput.writeMesh<VtkCellType::TETRA>(beam3d.V, beam3d.tets);
   }
