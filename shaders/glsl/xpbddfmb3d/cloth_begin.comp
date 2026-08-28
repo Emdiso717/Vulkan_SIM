@@ -16,6 +16,8 @@ layout(local_size_x = 64) in;
 layout(binding = 2) uniform UBO {
   float deltaT;
   float density;
+  float damping;
+  float padding;
   vec4 gravity;
   vec4 lame;
   ivec2 particleCount;

@@ -91,8 +91,13 @@ set(EXAMPLES
 	# ridcloth
 	# xpbddfmb2d
 	# riddfmb2d
+	# Legacy standalone sources are retained, but the comparison build exposes
+	# only the two measured solvers and the selectable demonstration.
 	# xpbddfmb3d
+	xpbdjacobi3d
 	riddfmb3d
+	ridbeam3d
+	xpbdvsrid3d
 	# computecloth
 )
 

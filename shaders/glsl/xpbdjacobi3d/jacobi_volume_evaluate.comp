@@ -1,0 +1,75 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+struct Particle {
+  vec4 pos;
+  vec4 vel;
+  vec4 uv;
+  vec4 normal;
+};
+struct ElementInfo {
+  ivec4 pid;
+  mat3x4 restShapeInv;
+  vec4 restData;
+};
+layout(std430, binding = 0) readonly buffer Particles { Particle particles[]; };
+layout(std140, binding = 1) uniform Params {
+  float deltaT;
+  float relaxation;
+  float lameLambda;
+  float lameMu;
+  vec4 gravity;
+  float damping;
+  uint particleCount;
+  uint edgeCount;
+  uint elementCount;
+} params;
+layout(std430, binding = 2) readonly buffer MassesInv { float massesInv[]; };
+layout(std430, binding = 3) readonly buffer FixedPoints { int fixedPoints[]; };
+layout(std430, binding = 4) readonly buffer Elements { ElementInfo elements[]; };
+layout(std430, binding = 7) buffer VolumeCorrections { vec4 corrections[]; };
+
+void main() {
+  uint elementId = gl_GlobalInvocationID.x;
+  if (elementId >= params.elementCount) {
+    return;
+  }
+  uint correction = 4 * elementId;
+  for (uint local = 0; local < 4; ++local) {
+    corrections[correction + local] = vec4(0.0);
+  }
+  ElementInfo element = elements[elementId];
+  const float eps = 1.0e-12;
+  float restVolume = element.restData.x;
+  if (restVolume <= eps || params.lameLambda <= eps) {
+    return;
+  }
+  mat3 inverseRestShape = mat3(element.restShapeInv);
+  mat3 Ds = mat3(particles[element.pid.y].pos.xyz - particles[element.pid.x].pos.xyz,
+                 particles[element.pid.z].pos.xyz - particles[element.pid.x].pos.xyz,
+                 particles[element.pid.w].pos.xyz - particles[element.pid.x].pos.xyz);
+  mat3 F = Ds * inverseRestShape;
+  float constraint = determinant(F) - 1.0;
+  mat3 cofactor = mat3(cross(F[1], F[2]), cross(F[2], F[0]), cross(F[0], F[1]));
+  mat3 H = cofactor * transpose(inverseRestShape);
+  vec3 gradients[4] = vec3[4](-H[0] - H[1] - H[2], H[0], H[1], H[2]);
+  float weights[4];
+  float denominator = 1.0 / (params.lameLambda * restVolume + eps) /
+                      (params.deltaT * params.deltaT) + eps;
+  for (uint local = 0; local < 4; ++local) {
+    weights[local] = fixedPoints[element.pid[local]] != 0
+                         ? 0.0
+                         : massesInv[element.pid[local]];
+    denominator += weights[local] * dot(gradients[local], gradients[local]);
+  }
+  if (isnan(constraint) || isinf(constraint) || isnan(denominator) ||
+      isinf(denominator) || denominator <= eps) {
+    return;
+  }
+  float deltaLambda = -constraint / denominator;
+  for (uint local = 0; local < 4; ++local) {
+    corrections[correction + local] = vec4(weights[local] * deltaLambda *
+                                            gradients[local], 0.0);
+  }
+}

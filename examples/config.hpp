@@ -185,6 +185,29 @@ inline bool loadTxt(const std::string &path, Entries &entries,
 }
 
 struct Riddfmb3dConfiguration {
+#if defined(RIDBEAM3D_COMPARISON)
+  std::string modelPath = "models/beam3d.vtk";
+  uint32_t numSolverIterations{1};
+  uint32_t substepsPerFrame{20};
+  // This compatibility value is synchronized from substepsPerFrame after the
+  // JSON is loaded: N substeps make one fixed 1/60 s rendered step.
+  float deltaTInv{1200.0f};
+  float density{1000.0f};
+  float damping{1.5f};
+  glm::vec4 gravity{0.0f, -9.8f, 0.0f, 0.0f};
+  float youngsModulus{1000000.0f};
+  float poissonRatio{0.40f};
+  bool fixedPlaneEnabled{true};
+  std::string fixedSelector{"PLANE"};
+  float fixedRelativeThickness{0.0f};
+  glm::vec4 fixedPlaneNormal{1.0f, 0.0f, 0.0f, 0.0f};
+  // beam3d spans x=[0, 6], so this matches the Jacobi sample's x<=8% slab.
+  float fixedPlaneOffset{0.0f};
+  float fixedPlaneTolerance{0.48f};
+  bool groundEnabled{false};
+  float groundHeight{-1.0f};
+  float groundRestitution{0.3f};
+#else
   std::string modelPath = "models/bunny_small(1).vtk";
   uint32_t numSolverIterations{1};
   float deltaTInv{300.0f};
@@ -203,6 +226,7 @@ struct Riddfmb3dConfiguration {
   bool groundEnabled{true};
   float groundHeight{-1.0f};
   float groundRestitution{0.3f};
+#endif
 };
 
 inline glm::vec4 lameParameters(const Riddfmb3dConfiguration &config) {

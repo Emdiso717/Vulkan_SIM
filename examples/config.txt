@@ -1,19 +1,19 @@
 # riddfmb3d runtime configuration
 # Usage: riddfmb3d --config examples/config.txt
 
-modelPath = models/bunny_3828_asc.vtk
+modelPath = models/beam3d.vtk
 numSolverIterations = 1
 # Simulation step is deltaT = 1 / deltaTInv.
-deltaTInv = 1200.0
+deltaTInv = 2400.0
 density = 1000.0
 damping = 1.5
 gravity = 0.0 -20 0.0 0.0
-youngsModulus = 22518000
+youngsModulus = 1e8
 poissonRatio = 0.4
 
 fixedPlaneEnabled = true
-fixedSelector = Y_MAX
-fixedRelativeThickness = 0.15
+fixedSelector = X_MIN
+fixedRelativeThickness = 0.1
 
 # No collision plane: the cantilever is free to swing.
 groundEnabled = false

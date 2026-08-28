@@ -1,0 +1,38 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+struct Particle {
+  vec4 pos;
+  vec4 vel;
+  vec4 uv;
+  vec4 normal;
+};
+layout(std430, binding = 0) buffer Particles { Particle particles[]; };
+layout(std140, binding = 1) uniform Params {
+  float deltaT;
+  float relaxation;
+  float lameLambda;
+  float lameMu;
+  vec4 gravity;
+  float damping;
+  uint particleCount;
+  uint edgeCount;
+  uint elementCount;
+} params;
+layout(std430, binding = 3) readonly buffer FixedPoints { int fixedPoints[]; };
+
+void main() {
+  uint particle = gl_GlobalInvocationID.x;
+  if (particle >= params.particleCount) {
+    return;
+  }
+  if (fixedPoints[particle] != 0) {
+    particles[particle].pos = particles[particle].vel;
+    particles[particle].vel = vec4(0.0);
+    return;
+  }
+  float damping = exp(-params.damping * params.deltaT);
+  particles[particle].vel.xyz =
+      (particles[particle].pos.xyz - particles[particle].vel.xyz) / params.deltaT * damping;
+}
