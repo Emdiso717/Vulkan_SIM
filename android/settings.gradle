@@ -1,5 +1,7 @@
-// Expose a single Android application containing both the Jacobi XPBD and
-// RID backends. The other example folders remain as implementation history
-// but are deliberately not Gradle modules.
+// Demo plus the two locked, single-backend APKs used for power measurement.
 include ':xpbdvsrid3d'
 project(':xpbdvsrid3d').projectDir = new File('examples/xpbdvsrid3d')
+include ':xpbdjacobi3d'
+project(':xpbdjacobi3d').projectDir = new File('examples/xpbdjacobi3d')
+include ':ridpower3d'
+project(':ridpower3d').projectDir = new File('examples/ridpower3d')

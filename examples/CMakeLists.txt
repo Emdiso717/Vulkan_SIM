@@ -87,8 +87,13 @@ function(buildExamples)
 endfunction(buildExamples)
 
 set(EXAMPLES
-	# The comparison sample owns both backends and is the only exposed example.
+	# The selectable solver comparison.
 	xpbdvsrid3d
+	# Locked single-backend executables for power measurement.
+	xpbdjacobi3d
+	ridpower3d
+	# Standalone PC RID cantilever sample.
+	riddfmb3d
 )
 
 buildExamples()

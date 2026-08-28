@@ -185,54 +185,32 @@ inline bool loadTxt(const std::string &path, Entries &entries,
 }
 
 struct Riddfmb3dConfiguration {
-#if defined(RIDBEAM3D_COMPARISON)
+  // The standalone RID sample always runs the cantilever beam: its selected
+  // endpoint slab is fixed and the opposite end remains free.
   std::string modelPath = "models/beam3d.vtk";
   uint32_t numSolverIterations{1};
   uint32_t substepsPerFrame{20};
   // This compatibility value is synchronized from substepsPerFrame after the
-  // JSON is loaded: N substeps make one fixed 1/60 s rendered step.
+  // configuration is loaded: N substeps make one fixed 1/60 s rendered step.
   float deltaTInv{1200.0f};
   float density{1000.0f};
   float damping{1.5f};
   glm::vec4 gravity{0.0f, -9.8f, 0.0f, 0.0f};
   float youngsModulus{1000000.0f};
   float poissonRatio{0.40f};
-  bool fixedPlaneEnabled{true};
-  std::string fixedSelector{"PLANE"};
-  float fixedRelativeThickness{0.0f};
-  glm::vec4 fixedPlaneNormal{1.0f, 0.0f, 0.0f, 0.0f};
-  // beam3d spans x=[0, 6], so this matches the Jacobi sample's x<=8% slab.
-  float fixedPlaneOffset{0.0f};
-  float fixedPlaneTolerance{0.48f};
+  // X_MIN fixes the cantilever's left end. Y_MAX is useful for suspended
+  // meshes. fixedRelativeThickness is the selected extent fraction.
+  std::string fixedSelector{"X_MIN"};
+  float fixedRelativeThickness{0.08f};
   bool groundEnabled{false};
   float groundHeight{-1.0f};
   float groundRestitution{0.3f};
-#else
-  std::string modelPath = "models/bunny_small(1).vtk";
-  uint32_t numSolverIterations{1};
-  float deltaTInv{300.0f};
-  float density{1000.0f};
-  // Per-second mass-proportional damping rate, applied to velocity each step.
-  float damping{0.0f};
-  glm::vec4 gravity{0.0f, -9.8f, 0.0f, 0.0f};
-  float youngsModulus{1000000.0f};
-  float poissonRatio{0.49f};
-  bool fixedPlaneEnabled{false};
-  std::string fixedSelector{"PLANE"};
-  float fixedRelativeThickness{0.0f};
-  glm::vec4 fixedPlaneNormal{1.0f, 0.0f, 0.0f, 0.0f};
-  float fixedPlaneOffset{0.0f};
-  float fixedPlaneTolerance{1e-4f};
-  bool groundEnabled{true};
-  float groundHeight{-1.0f};
-  float groundRestitution{0.3f};
-#endif
 };
 
 inline glm::vec4 lameParameters(const Riddfmb3dConfiguration &config) {
-  const float lambda = config.youngsModulus * config.poissonRatio /
-                       ((1.0f + config.poissonRatio) *
-                        (1.0f - 2.0f * config.poissonRatio));
+  const float lambda =
+      config.youngsModulus * config.poissonRatio /
+      ((1.0f + config.poissonRatio) * (1.0f - 2.0f * config.poissonRatio));
   const float mu = config.youngsModulus / (2.0f * (1.0f + config.poissonRatio));
   return glm::vec4(lambda, mu, 0.0f, 0.0f);
 }
@@ -300,8 +278,8 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
       if (parseFloat(value, parsed) && parsed > 0.0f) {
         config.youngsModulus = parsed;
       } else {
-        std::cerr << "riddfmb3d: invalid youngsModulus at line "
-                  << entry.line << "\n";
+        std::cerr << "riddfmb3d: invalid youngsModulus at line " << entry.line
+                  << "\n";
       }
     } else if (key == "poissonRatio") {
       float parsed = 0.0f;
@@ -311,19 +289,18 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
         std::cerr << "riddfmb3d: poissonRatio must be in (-1, 0.5) at line "
                   << entry.line << "\n";
       }
-    } else if (key == "fixedPlaneEnabled") {
-      bool parsed = false;
-      if (parseBool(value, parsed)) {
-        config.fixedPlaneEnabled = parsed;
-      } else {
-        std::cerr << "riddfmb3d: invalid fixedPlaneEnabled at line "
-                  << entry.line << "\n";
-      }
+    } else if (key == "fixedPlaneEnabled" ||
+               key == "fixedPlaneNormal" || key == "fixedPlaneOffset" ||
+               key == "fixedPlaneTolerance") {
+      // Older experiment scripts may still include these plane keys. Fixed
+      // points are now selected exclusively by fixedSelector, so accept the
+      // keys without changing the selector-based behavior.
+      continue;
     } else if (key == "fixedSelector") {
-      if (value == "PLANE" || value == "Y_MAX") {
+      if (value == "X_MIN" || value == "Y_MAX") {
         config.fixedSelector = value;
       } else {
-        std::cerr << "riddfmb3d: fixedSelector must be PLANE or Y_MAX at line "
+        std::cerr << "riddfmb3d: fixedSelector must be X_MIN or Y_MAX at line "
                   << entry.line << "\n";
       }
     } else if (key == "fixedRelativeThickness") {
@@ -333,30 +310,6 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
       } else {
         std::cerr << "riddfmb3d: fixedRelativeThickness must be in (0, 1] at "
                   << "line " << entry.line << "\n";
-      }
-    } else if (key == "fixedPlaneNormal") {
-      glm::vec4 parsed{};
-      if (parseVec4(value, parsed)) {
-        config.fixedPlaneNormal = parsed;
-      } else {
-        std::cerr << "riddfmb3d: invalid fixedPlaneNormal at line "
-                  << entry.line << "\n";
-      }
-    } else if (key == "fixedPlaneOffset") {
-      float parsed = 0.0f;
-      if (parseFloat(value, parsed)) {
-        config.fixedPlaneOffset = parsed;
-      } else {
-        std::cerr << "riddfmb3d: invalid fixedPlaneOffset at line "
-                  << entry.line << "\n";
-      }
-    } else if (key == "fixedPlaneTolerance") {
-      float parsed = 0.0f;
-      if (parseFloat(value, parsed) && parsed >= 0.0f) {
-        config.fixedPlaneTolerance = parsed;
-      } else {
-        std::cerr << "riddfmb3d: invalid fixedPlaneTolerance at line "
-                  << entry.line << "\n";
       }
     } else if (key == "groundEnabled") {
       bool parsed = false;
@@ -393,21 +346,14 @@ inline void loadRiddfmb3dConfiguration(const std::vector<const char *> &args,
             << ", numSolverIterations=" << config.numSolverIterations
             << ", deltaTInv=" << config.deltaTInv
             << ", deltaT=" << 1.0f / config.deltaTInv
-            << ", density=" << config.density
-            << ", damping=" << config.damping
+            << ", density=" << config.density << ", damping=" << config.damping
             << ", gravity=(" << config.gravity.x << ", " << config.gravity.y
             << ", " << config.gravity.z << ", " << config.gravity.w << ")"
             << ", youngsModulus=" << config.youngsModulus
-            << ", poissonRatio=" << config.poissonRatio
-            << ", lame=(" << lame.x << ", " << lame.y << ", " << lame.z
-            << ", " << lame.w << ")"
-            << ", fixedPlaneEnabled=" << config.fixedPlaneEnabled
+            << ", poissonRatio=" << config.poissonRatio << ", lame=(" << lame.x
+            << ", " << lame.y << ", " << lame.z << ", " << lame.w << ")"
             << ", fixedSelector=" << config.fixedSelector
             << ", fixedRelativeThickness=" << config.fixedRelativeThickness
-            << ", fixedPlaneNormal=(" << config.fixedPlaneNormal.x << ", "
-            << config.fixedPlaneNormal.y << ", " << config.fixedPlaneNormal.z
-            << "), fixedPlaneOffset=" << config.fixedPlaneOffset
-            << ", fixedPlaneTolerance=" << config.fixedPlaneTolerance
             << ", groundEnabled=" << config.groundEnabled
             << ", groundHeight=" << config.groundHeight
             << ", groundRestitution=" << config.groundRestitution << "\n";

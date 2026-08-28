@@ -514,72 +514,52 @@ public:
   void Boundarycondition() {
     uint32_t numParticles = static_cast<uint32_t>(beam3d.V.rows());
     compute.fixedpoint.resize(numParticles, 0);
-    if (!config.fixedPlaneEnabled) {
+    if (numParticles == 0) {
+      std::cerr << "riddfmb3d: cannot select fixed points on an empty mesh\n";
+      return;
+    }
+    if (config.fixedRelativeThickness <= 0.0f ||
+        config.fixedRelativeThickness > 1.0f) {
+      std::cerr << "riddfmb3d: fixedRelativeThickness must be in (0, 1]\n";
       return;
     }
 
-    if (config.fixedSelector == "Y_MAX") {
-      // Fix the upper relative-thickness portion of the mesh Y extent.
-      if (config.fixedRelativeThickness <= 0.0f ||
-          config.fixedRelativeThickness > 1.0f) {
-        std::cerr << "riddfmb3d: Y_MAX requires fixedRelativeThickness in "
-                     "(0, 1]\n";
-        return;
-      }
-      if (numParticles == 0) {
-        std::cerr << "riddfmb3d: cannot select Y_MAX on an empty mesh\n";
-        return;
-      }
-
-      float yMin = std::numeric_limits<float>::max();
-      float yMax = std::numeric_limits<float>::lowest();
-      for (uint32_t i = 0; i < numParticles; i++) {
-        const float y = beam3d.V(i, 1);
-        yMin = std::min(yMin, y);
-        yMax = std::max(yMax, y);
-      }
-
-      const float selectionStart =
-          yMax - (yMax - yMin) * config.fixedRelativeThickness;
-      uint32_t yMaxFixedCount = 0;
-      for (uint32_t i = 0; i < numParticles; i++) {
-        if (beam3d.V(i, 1) >= selectionStart) {
-          compute.fixedpoint[i] = 1;
-          yMaxFixedCount++;
-        }
-      }
-      std::cout << "riddfmb3d: fixed " << yMaxFixedCount
-                << " particles using Y_MAX with relative thickness "
-                << config.fixedRelativeThickness << "\n";
-      return;
-    }
-
-    if (config.fixedSelector != "PLANE") {
+    uint32_t axis = 0;
+    bool selectMaximum = false;
+    if (config.fixedSelector == "X_MIN") {
+      axis = 0;
+    } else if (config.fixedSelector == "Y_MAX") {
+      axis = 1;
+      selectMaximum = true;
+    } else {
       std::cerr << "riddfmb3d: unsupported fixed selector '"
                 << config.fixedSelector << "'\n";
       return;
     }
 
-    const glm::vec3 normal(config.fixedPlaneNormal);
-    const float normalLength = glm::length(normal);
-    if (normalLength <= 1e-6f) {
-      std::cerr << "riddfmb3d: fixedPlaneNormal must not be zero\n";
-      return;
+    float extentMin = std::numeric_limits<float>::max();
+    float extentMax = std::numeric_limits<float>::lowest();
+    for (uint32_t i = 0; i < numParticles; ++i) {
+      const float coordinate = beam3d.V(i, axis);
+      extentMin = std::min(extentMin, coordinate);
+      extentMax = std::max(extentMax, coordinate);
     }
-
+    const float boundary = selectMaximum
+                               ? extentMax - (extentMax - extentMin) *
+                                                 config.fixedRelativeThickness
+                               : extentMin + (extentMax - extentMin) *
+                                                 config.fixedRelativeThickness;
     uint32_t fixedCount = 0;
-    for (uint32_t i = 0; i < numParticles; i++) {
-      const glm::vec3 position(beam3d.V(i, 0), beam3d.V(i, 1), beam3d.V(i, 2));
-      const float distance =
-          std::abs(glm::dot(normal, position) - config.fixedPlaneOffset) /
-          normalLength;
-      if (distance <= config.fixedPlaneTolerance) {
+    for (uint32_t i = 0; i < numParticles; ++i) {
+      const float coordinate = beam3d.V(i, axis);
+      if (selectMaximum ? coordinate >= boundary : coordinate <= boundary) {
         compute.fixedpoint[i] = 1;
-        fixedCount++;
+        ++fixedCount;
       }
     }
-    std::cout << "riddfmb3d: fixed " << fixedCount
-              << " particles on the configured plane\n";
+    std::cout << "riddfmb3d: fixed " << fixedCount << " particles using "
+              << config.fixedSelector << " with relative thickness "
+              << config.fixedRelativeThickness << "\n";
   }
 
   void buildElementInfoFromMesh() {
