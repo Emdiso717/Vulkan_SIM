@@ -23,6 +23,14 @@
 
 ## 构建与运行（PC）
 
+### 获取代码
+
+克隆仓库后，请初始化并同步所有子模块：
+
+```powershell
+git submodule update --init --recursive
+```
+
 ### 前置条件
 
 - 支持 C++20 的编译器（Windows 推荐 Visual Studio 2022）；
