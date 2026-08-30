@@ -281,8 +281,14 @@ public:
                 simulationSubsteps());
 
     bool changed = false;
-    changed |= ImGui::SliderFloat("Young's modulus (E)", &config.youngsModulus,
-                                  1.0e5f, 1.0e8f, "%.0f");
+    float youngsExponent = std::log10(
+        std::clamp(config.youngsModulus, 1.0e5f, 1.0e8f));
+    if (ImGui::SliderFloat("Young's modulus log10(E)", &youngsExponent,
+                           5.0f, 8.0f, "%.2f")) {
+      config.youngsModulus = std::pow(10.0f, youngsExponent);
+      changed = true;
+    }
+    ImGui::Text("E = %.3e", config.youngsModulus);
     changed |= ImGui::SliderFloat("Poisson ratio (Pr)", &config.poissonRatio,
                                   0.30f, 0.49f, "%.3f");
     changed |= ImGui::SliderFloat(
