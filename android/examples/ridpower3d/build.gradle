@@ -62,8 +62,7 @@ task copyTask {
     copy {
         from rootProject.ext.shaderPath + 'glsl/riddfmb3d'
         into 'assets/shaders/glsl/riddfmb3d'
-        include 'beam3d.vert.spv', 'beam3d.frag.spv',
-                'rid_begin.comp.spv', 'rid_solve.comp.spv', 'rid_end.comp.spv'
+        include '*.spv'
     }
 
     copy {
@@ -78,5 +77,4 @@ task copyTask {
     }
 }
 
-copyTask.dependsOn cleanGeneratedShaderAssets
 preBuild.dependsOn copyTask

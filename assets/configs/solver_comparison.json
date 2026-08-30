@@ -1,8 +1,8 @@
 {
-  "substepsPerFrame": 30,
-  "youngsModulus": 1.0e7,
+  "substepsPerFrame": 25,
+  "youngsModulus": 1.0e6,
   "poissonRatio": 0.40,
-  "gravity": 0.0,
+  "gravity": 20,
   "scene": "beam_twist_3pi",
-  "solver": "jacobi"
+  "solver": "rid"
 }

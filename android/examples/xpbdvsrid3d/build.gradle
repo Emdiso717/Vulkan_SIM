@@ -24,7 +24,6 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-            signingConfig signingConfigs.debug
         }
     }
     externalNativeBuild { cmake { path 'CMakeLists.txt' } }
@@ -35,7 +34,7 @@ task copyTask {
     copy { from rootProject.ext.shaderPath + 'glsl/base'; into 'assets/shaders/glsl/base'; include '*.spv' }
     copy { from rootProject.ext.shaderPath + 'glsl/xpbdjacobi3d'; into 'assets/shaders/glsl/xpbdjacobi3d'; include '*.spv' }
     copy { from rootProject.ext.shaderPath + 'glsl/riddfmb3d'; into 'assets/shaders/glsl/riddfmb3d'; include '*.spv' }
-    copy { from rootProject.ext.assetPath + 'models'; into 'assets/models'; include 'bunny_3828_asc.vtk', 'beam3d.vtk' }
+    copy { from rootProject.ext.assetPath + 'models'; into 'assets/models'; include 'bunny_3828_asc.vtk','beam3d.vtk' }
     copy { from rootProject.ext.assetPath + 'configs'; into 'assets/configs'; include 'solver_comparison.json' }
 }
 preBuild.dependsOn copyTask
