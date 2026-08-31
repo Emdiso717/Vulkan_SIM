@@ -61,6 +61,25 @@ cmake --build build --target riddfmb3d --config Release
 | `groundHeight` | 浮点数 | 地面 Y 坐标。 |
 | `groundRestitution` | 浮点数，`>= 0` | 碰撞反弹系数；通常使用 `0` 到 `1`。 |
 
+## RID 参考杨氏模量查找表
+
+RID 在有限子步和迭代次数下，配置中的 `youngsModulus` 与期望的材料杨氏
+模量并不总是相同。以下离线标定表给出用于匹配目标材料刚度的 RID 参考值：
+
+| 模型 | 完整查找表 | 目标杨氏模量 | 每帧子步数 | 泊松比 |
+| --- | --- | --- | --- | --- |
+| `beam30x5x5` | [`beam30x5x5_lookup.csv`](../examples/riddfmb3d/beam30x5x5_lookup.csv) | 5--50 MPa | 15、20、25、30、35、40 | 0.40 |
+| `bunny3828` | [`bunny3828_lookup.csv`](../examples/riddfmb3d/bunny3828_lookup.csv) | 2--30 MPa | 15、17、20、25、30、40 | 0.40 |
+
+使用方式：选择与模型、`target_E_Pa`、`substeps` 和 `poisson_ratio` 完全匹配，且
+`lookup_allowed` 为 `TRUE` 的一行；将该行的 `compensated_E_Pa` 写入
+`youngsModulus`。`target_E_Pa` 只表示希望复现的目标材料刚度，不应直接填入
+`youngsModulus`。对应的每帧子步数为 `deltaTInv / 60`，例如 `deltaTInv = 1800`
+对应 30 个子步。
+
+两张表仅适用于各自模型及其标定时的场景、边界条件和其余求解参数；修改这些条件后应重新
+标定，而不是直接外推表中数值。
+
 ### 固定端选择
 
 `X_MIN` 固定模型 X 最小端的一段。对 `beam3d.vtk`，`0.08` 表示固定 X 方向
